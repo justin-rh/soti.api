@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RFID Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <div class="header-logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+          <rect width="28" height="28" rx="6" fill="#1a56db"/>
+          <rect x="5" y="8" width="7" height="5" rx="1" fill="white"/>
+          <rect x="5" y="15" width="7" height="5" rx="1" fill="white"/>
+          <rect x="14" y="8" width="9" height="5" rx="1" fill="white" opacity="0.7"/>
+          <rect x="14" y="15" width="9" height="5" rx="1" fill="white" opacity="0.7"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="header-title">RFID Dashboard</h1>
+        <p id="header-subtitle" class="header-subtitle">Printer Monitoring Dashboard</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div id="refresh-indicator" class="refresh-indicator hidden">
+        <span class="spinner"></span> Refreshing&hellip;
+      </div>
+      <div class="header-meta">
+        <span class="meta-label">Last updated:</span>
+        <span id="last-updated" class="meta-value">—</span>
+      </div>
+      <div class="header-meta">
+        <span class="meta-label">Next refresh:</span>
+        <span id="countdown" class="meta-value countdown">60s</span>
+      </div>
+      <button id="refresh-btn" class="btn-refresh" title="Refresh now">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M13.65 2.35A8 8 0 1 0 15 8h-2a6 6 0 1 1-1.06-3.39L10 7h5V2l-1.35.35z" fill="currentColor"/>
+        </svg>
+        Refresh
+      </button>
+    </div>
+  </header>
+
+  <!-- Tab strip -->
+  <nav class="tab-strip" role="tablist" aria-label="Dashboard sections">
+    <button class="tab-btn tab-btn--active" data-tab="connect" role="tab"
+            aria-selected="true" aria-controls="tab-connect">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <rect x="1" y="4" width="6" height="4" rx="1" stroke="currentColor" stroke-width="1.5"/>
+        <rect x="1" y="10" width="6" height="4" rx="1" stroke="currentColor" stroke-width="1.5"/>
+        <rect x="9" y="4" width="6" height="4" rx="1" stroke="currentColor" stroke-width="1.5" opacity=".6"/>
+        <rect x="9" y="10" width="6" height="4" rx="1" stroke="currentColor" stroke-width="1.5" opacity=".6"/>
+      </svg>
+      SOTI Connect
+    </button>
+    <button class="tab-btn" data-tab="mobicontrol" role="tab"
+            aria-selected="false" aria-controls="tab-mobicontrol">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <rect x="4" y="1" width="8" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="8" cy="12.5" r="1" fill="currentColor"/>
+      </svg>
+      MobiControl
+    </button>
+    <button class="tab-btn" data-tab="ping" role="tab"
+            aria-selected="false" aria-controls="tab-ping">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M4.2 11.8a5.5 5.5 0 0 1 0-7.6M11.8 4.2a5.5 5.5 0 0 1 0 7.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M2 14a8.5 8.5 0 0 1 0-12M14 2a8.5 8.5 0 0 1 0 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity=".5"/>
+      </svg>
+      Readers
+    </button>
+    <button class="tab-btn" data-tab="portals" role="tab"
+            aria-selected="false" aria-controls="tab-portals">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <rect x="1" y="3" width="14" height="10" rx="2" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M5 7h6M5 9.5h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".7"/>
+      </svg>
+      Portals
+    </button>
+  </nav>
+
+  <main class="main">
+
+    <!-- ═══ SOTI CONNECT TAB ════════════════════════════════════════════════ -->
+    <div id="tab-connect" class="tab-content tab-content--active" role="tabpanel">
+
+      <div id="error-banner" class="error-banner hidden">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="7" stroke="#c0392b" stroke-width="1.5"/>
+          <path d="M8 4v5M8 11v1" stroke="#c0392b" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span id="error-message">Failed to load data.</span>
+      </div>
+
+      <section class="summary-grid" aria-label="Connect summary">
+        <div class="card card--total">
+          <div class="card-label">Total Printers</div>
+          <div id="stat-total" class="card-value">—</div>
+        </div>
+        <div class="card card--online">
+          <div class="card-label">Online</div>
+          <div id="stat-online" class="card-value">—</div>
+        </div>
+        <div class="card card--offline">
+          <div class="card-label">Offline</div>
+          <div id="stat-offline" class="card-value">—</div>
+        </div>
+        <div class="card card--alerts">
+          <div class="card-label">Alerts</div>
+          <div id="stat-alerts" class="card-value">—</div>
+        </div>
+      </section>
+
+      <section class="filter-bar" aria-label="Connect filters">
+        <div class="filter-search-wrap">
+          <svg class="filter-search-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="6.5" cy="6.5" r="5" stroke="#94a3b8" stroke-width="1.5"/>
+            <path d="M10.5 10.5l3 3" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="filter-search" class="filter-input"
+                 placeholder="Search name, model, IP, serial…" aria-label="Search printers" />
+        </div>
+        <select id="filter-status" class="filter-select" aria-label="Filter by status">
+          <option value="">All Statuses</option>
+          <option value="Online">Online</option>
+          <option value="Offline">Offline</option>
+          <option value="alert">Has Alert</option>
+        </select>
+        <select id="filter-group" class="filter-select" aria-label="Filter by group">
+          <option value="">All Groups</option>
+        </select>
+        <button id="clear-filters" class="btn-clear" title="Clear all filters">Clear</button>
+      </section>
+
+      <section class="table-wrap" aria-label="Printer list">
+        <table class="printer-table" id="printer-table">
+          <thead>
+            <tr>
+              <th class="col-name"     data-sort="name">Name <span class="sort-icon">↕</span></th>
+              <th class="col-model"    data-sort="model">Model <span class="sort-icon">↕</span></th>
+              <th class="col-group"    data-sort="group">Group <span class="sort-icon">↕</span></th>
+              <th class="col-ip">IP Address</th>
+              <th class="col-status"   data-sort="status">Status <span class="sort-icon">↕</span></th>
+              <th class="col-battery"  data-sort="battery">Battery <span class="sort-icon">↕</span></th>
+              <th class="col-lastseen" data-sort="lastSeen">Last Contact <span class="sort-icon">↕</span></th>
+              <th class="col-firmware">Firmware</th>
+              <th class="col-description">Description</th>
+              <th class="col-alert">Alert</th>
+              <th class="col-rfid">RFID</th>
+              <th class="col-actions"></th>
+            </tr>
+          </thead>
+          <tbody id="table-body">
+            <tr class="table-placeholder">
+              <td colspan="12">Loading printer data&hellip;</td>
+            </tr>
+          </tbody>
+        </table>
+        <div id="no-results" class="no-results hidden">No printers match the current filters.</div>
+        <div class="table-footer">
+          <span id="row-count" class="row-count"></span>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══ MOBICONTROL TAB ══════════════════════════════════════════════════ -->
+    <div id="tab-mobicontrol" class="tab-content" role="tabpanel">
+
+      <div id="mc-error-banner" class="error-banner hidden">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="7" stroke="#c0392b" stroke-width="1.5"/>
+          <path d="M8 4v5M8 11v1" stroke="#c0392b" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span id="mc-error-message">Failed to load data.</span>
+      </div>
+
+      <section class="summary-grid" aria-label="MobiControl summary">
+        <div class="card card--total">
+          <div class="card-label">Total Devices</div>
+          <div id="stat-mc-total" class="card-value">—</div>
+        </div>
+        <div class="card card--online">
+          <div class="card-label">Online</div>
+          <div id="stat-mc-online" class="card-value">—</div>
+        </div>
+        <div class="card card--offline">
+          <div class="card-label">Offline</div>
+          <div id="stat-mc-offline" class="card-value">—</div>
+        </div>
+        <div class="card card--noncompliant">
+          <div class="card-label">Non-Compliant</div>
+          <div id="stat-mc-noncompliant" class="card-value">—</div>
+        </div>
+      </section>
+
+      <section class="filter-bar" aria-label="MobiControl filters">
+        <div class="filter-search-wrap">
+          <svg class="filter-search-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="6.5" cy="6.5" r="5" stroke="#94a3b8" stroke-width="1.5"/>
+            <path d="M10.5 10.5l3 3" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="mc-filter-search" class="filter-input"
+                 placeholder="Search name, model, serial, user…" aria-label="Search devices" />
+        </div>
+        <select id="mc-filter-platform" class="filter-select" aria-label="Filter by platform">
+          <option value="">All Platforms</option>
+        </select>
+        <select id="mc-filter-status" class="filter-select" aria-label="Filter by status">
+          <option value="">All Statuses</option>
+          <option value="Online">Online</option>
+          <option value="Offline">Offline</option>
+        </select>
+        <select id="mc-filter-compliance" class="filter-select" aria-label="Filter by compliance">
+          <option value="">All Compliance</option>
+          <option value="Compliant">Compliant</option>
+          <option value="Non-Compliant">Non-Compliant</option>
+          <option value="Unknown">Unknown</option>
+        </select>
+        <select id="mc-filter-group" class="filter-select" aria-label="Filter by group">
+          <option value="">All Groups</option>
+        </select>
+        <button id="mc-clear-filters" class="btn-clear" title="Clear all filters">Clear</button>
+      </section>
+
+      <section class="table-wrap" aria-label="Device list">
+        <table class="printer-table" id="mc-table">
+          <thead>
+            <tr>
+              <th class="col-mc-name"       data-sort-mc="name">Name <span class="sort-icon">↕</span></th>
+              <th class="col-mc-platform"   data-sort-mc="platform">Platform <span class="sort-icon">↕</span></th>
+              <th class="col-mc-model"      data-sort-mc="model">Model <span class="sort-icon">↕</span></th>
+              <th class="col-mc-group"      data-sort-mc="group">Group <span class="sort-icon">↕</span></th>
+              <th class="col-mc-status"     data-sort-mc="status">Status <span class="sort-icon">↕</span></th>
+              <th class="col-mc-os">OS Version</th>
+              <th class="col-mc-lastseen"   data-sort-mc="lastCheckIn">Last Check-in <span class="sort-icon">↕</span></th>
+              <th class="col-mc-user"       data-sort-mc="userName">User <span class="sort-icon">↕</span></th>
+              <th class="col-mc-compliance" data-sort-mc="compliance">Compliance <span class="sort-icon">↕</span></th>
+            </tr>
+          </thead>
+          <tbody id="mc-table-body">
+            <tr class="table-placeholder">
+              <td colspan="9">Loading device data&hellip;</td>
+            </tr>
+          </tbody>
+        </table>
+        <div id="mc-no-results" class="no-results hidden">No devices match the current filters.</div>
+        <div class="table-footer">
+          <span id="mc-row-count" class="row-count"></span>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══ PING MONITOR TAB ════════════════════════════════════════════════ -->
+    <div id="tab-ping" class="tab-content" role="tabpanel">
+
+      <section class="summary-grid summary-grid--5" aria-label="Ping summary">
+        <div class="card card--total">
+          <div class="card-label">Total Hosts</div>
+          <div id="ping-s-total" class="card-value">0</div>
+        </div>
+        <div class="card card--online">
+          <div class="card-label">Online</div>
+          <div id="ping-s-up" class="card-value">0</div>
+        </div>
+        <div class="card card--offline">
+          <div class="card-label">Offline</div>
+          <div id="ping-s-down" class="card-value">0</div>
+        </div>
+        <div class="card card--api">
+          <div class="card-label">API Reachable</div>
+          <div id="ping-s-api" class="card-value">0</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Avg Latency</div>
+          <div id="ping-s-lat" class="card-value">—</div>
+        </div>
+      </section>
+
+      <section class="ping-controls">
+        <div class="ping-controls-row">
+          <div class="ping-excel-group">
+            <input class="ping-excel-input" id="ping-excel-path"
+                   placeholder="C:\path\to\hosts.xlsx" />
+            <button class="btn btn--attach" id="ping-excel-load-btn">Load Excel</button>
+          </div>
+          <span id="ping-excel-badge" class="ping-excel-badge hidden">✓ Excel loaded</span>
+          <button class="btn" id="ping-excel-save-btn" style="display:none">Save to Excel</button>
+          <button class="btn" id="ping-csv-btn">Export CSV</button>
+          <div class="ping-sep"></div>
+          <div class="ping-auto-row">
+            <label class="ping-toggle">
+              <input type="checkbox" id="ping-auto-chk" checked />
+              <span class="ping-toggle-slider"></span>
+            </label>
+            Auto every
+            <select id="ping-interval-sel">
+              <option value="1">1 min</option>
+              <option value="5" selected>5 min</option>
+              <option value="10">10 min</option>
+              <option value="30">30 min</option>
+            </select>
+          </div>
+          <button class="btn btn--primary" id="ping-run-btn">▶ Run all</button>
+        </div>
+        <div class="ping-add-row">
+          <input class="ping-add-input" id="ping-add-input"
+                 placeholder="Add a host — type an IP or hostname and press Enter" />
+          <button class="btn" id="ping-add-btn">+ Add host</button>
+        </div>
+        <div class="ping-auth-row">
+          <span class="ping-auth-label">Reader API:</span>
+          <input id="ping-api-user" class="ping-auth-input" value="admin" placeholder="username" />
+          <input id="ping-api-pass" class="ping-auth-input" type="password" value="change01" placeholder="password" />
+          <button class="btn btn--sm" id="ping-auth-btn">Apply</button>
+          <span class="ping-auth-hint">Used for REST API probe on ports 80 / 443</span>
+        </div>
+      </section>
+
+      <section class="table-wrap" aria-label="Ping hosts">
+        <div class="ping-table-header">
+          <span class="ping-table-title">Hosts</span>
+          <span id="ping-last-run" class="ping-last-run">Not yet run</span>
+        </div>
+        <table class="printer-table" id="ping-table">
+          <thead>
+            <tr>
+              <th style="width:36px">#</th>
+              <th>Address</th>
+              <th>Name</th>
+              <th style="width:110px">Status</th>
+              <th style="width:130px">Services</th>
+              <th>Reader Info</th>
+              <th style="width:75px">Latency</th>
+              <th style="width:95px">Last Checked</th>
+              <th style="width:90px">History</th>
+              <th style="width:85px"></th>
+            </tr>
+          </thead>
+          <tbody id="ping-tbody">
+            <tr class="table-placeholder">
+              <td colspan="10">No hosts yet — load an Excel file or add a host above</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="table-footer">
+          <span id="ping-row-count" class="row-count"></span>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ═══ PORTALS TAB ══════════════════════════════════════════════════════ -->
+    <div id="tab-portals" class="tab-content" role="tabpanel">
+
+      <section class="summary-grid" aria-label="Portals summary">
+        <div class="card card--total">
+          <div class="card-label">Total Portals</div>
+          <div id="portal-s-total" class="card-value">0</div>
+        </div>
+        <div class="card card--online">
+          <div class="card-label">Reachable</div>
+          <div id="portal-s-up" class="card-value">0</div>
+        </div>
+        <div class="card card--offline">
+          <div class="card-label">Unreachable</div>
+          <div id="portal-s-down" class="card-value">0</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Avg Response</div>
+          <div id="portal-s-lat" class="card-value">—</div>
+        </div>
+      </section>
+
+      <section class="ping-controls">
+        <div class="ping-controls-row">
+          <div class="ping-auto-row">
+            <label class="ping-toggle">
+              <input type="checkbox" id="portal-auto-chk" checked />
+              <span class="ping-toggle-slider"></span>
+            </label>
+            Auto every
+            <select id="portal-interval-sel">
+              <option value="1">1 min</option>
+              <option value="5" selected>5 min</option>
+              <option value="10">10 min</option>
+              <option value="30">30 min</option>
+            </select>
+          </div>
+          <button class="btn btn--primary" id="portal-run-btn">▶ Run all</button>
+        </div>
+      </section>
+
+      <section class="table-wrap" aria-label="Portal list">
+        <div class="ping-table-header">
+          <span class="ping-table-title">Portals</span>
+          <span id="portal-last-run" class="ping-last-run">Not yet run</span>
+        </div>
+        <table class="printer-table" id="portal-table">
+          <thead>
+            <tr>
+              <th style="width:36px">#</th>
+              <th>Location</th>
+              <th style="width:100px">Portal</th>
+              <th>URL</th>
+              <th style="width:110px">Status</th>
+              <th style="width:80px">HTTP</th>
+              <th style="width:100px">Response Time</th>
+              <th style="width:95px">Last Checked</th>
+              <th style="width:90px">History</th>
+              <th style="width:70px"></th>
+            </tr>
+          </thead>
+          <tbody id="portal-tbody">
+            <tr class="table-placeholder">
+              <td colspan="10">Loading portal data&hellip;</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="table-footer">
+          <span id="portal-row-count" class="row-count"></span>
+        </div>
+      </section>
+
+    </div>
+
+  </main>
+
+  <div id="ping-toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
