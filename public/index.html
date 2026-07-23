@@ -257,7 +257,7 @@
     <!-- ═══ PING MONITOR TAB ════════════════════════════════════════════════ -->
     <div id="tab-ping" class="tab-content" role="tabpanel">
 
-      <section class="summary-grid summary-grid--5" aria-label="Ping summary">
+      <section class="summary-grid summary-grid--6" aria-label="Ping summary">
         <div class="card card--total">
           <div class="card-label">Total Hosts</div>
           <div id="ping-s-total" class="card-value">0</div>
@@ -266,9 +266,13 @@
           <div class="card-label">Online</div>
           <div id="ping-s-up" class="card-value">0</div>
         </div>
-        <div class="card card--offline">
+        <div class="card card--warn">
           <div class="card-label">Offline</div>
           <div id="ping-s-down" class="card-value">0</div>
+        </div>
+        <div class="card card--unreachable">
+          <div class="card-label">Unreachable</div>
+          <div id="ping-s-unreachable" class="card-value">0</div>
         </div>
         <div class="card card--api">
           <div class="card-label">API Reachable</div>

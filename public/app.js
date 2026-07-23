@@ -629,6 +629,7 @@
     e.sTotal       = document.getElementById('ping-s-total');
     e.sUp          = document.getElementById('ping-s-up');
     e.sDown        = document.getElementById('ping-s-down');
+    e.sUnreachable = document.getElementById('ping-s-unreachable');
     e.sApi         = document.getElementById('ping-s-api');
     e.sLat         = document.getElementById('ping-s-lat');
     e.excelPath    = document.getElementById('ping-excel-path');
@@ -707,17 +708,19 @@
   }
 
   function renderPingStats(hosts) {
-    const up    = hosts.filter(h => h.status === 'up').length;
-    const down  = hosts.filter(h => ['down','pending'].includes(h.status)).length;
-    const api   = hosts.filter(h => h.api && h.api.reachable && !h.api.auth_error).length;
-    const lats  = hosts.filter(h => h.latency != null).map(h => h.latency);
-    const avg   = lats.length ? Math.round(lats.reduce((a, b) => a + b, 0) / lats.length) : null;
-    const e     = pingTab.el;
-    e.sTotal.textContent = hosts.length;
-    e.sUp.textContent    = up;
-    e.sDown.textContent  = down;
-    e.sApi.textContent   = api;
-    e.sLat.textContent   = avg != null ? avg + 'ms' : '—';
+    const up          = hosts.filter(h => h.status === 'up').length;
+    const offline     = hosts.filter(h => h.status === 'down' && h.ever_up).length;
+    const unreachable = hosts.filter(h => h.status === 'down' && !h.ever_up).length;
+    const api         = hosts.filter(h => h.api && h.api.reachable && !h.api.auth_error).length;
+    const lats        = hosts.filter(h => h.latency != null).map(h => h.latency);
+    const avg         = lats.length ? Math.round(lats.reduce((a, b) => a + b, 0) / lats.length) : null;
+    const e           = pingTab.el;
+    e.sTotal.textContent       = hosts.length;
+    e.sUp.textContent          = up;
+    e.sDown.textContent        = offline;
+    e.sUnreachable.textContent = unreachable;
+    e.sApi.textContent         = api;
+    e.sLat.textContent         = avg != null ? avg + 'ms' : '—';
   }
 
   function renderPingTable(hosts) {
@@ -774,9 +777,12 @@
   }
 
   function buildApiInfo(api) {
-    if (!api || !Object.keys(api).length || (!api.reachable && !api.auth_error))
-      return '<span class="cell-na">—</span>';
+    if (!api || !Object.keys(api).length) return '<span class="cell-na">—</span>';
     if (api.auth_error) return '<span class="api-auth-err">401 · check credentials</span>';
+
+    const hasData = api.firmware || api.antennas_total != null || api.temperature != null;
+    if (!api.reachable && !hasData) return '<span class="cell-na">—</span>';
+
     const parts = [];
     if (api.firmware)            parts.push(`<span class="api-fw">FW&nbsp;${esc(api.firmware)}</span>`);
     if (api.antennas_total != null) {
@@ -790,8 +796,12 @@
       const cls = t > 70 ? 'temp-hot' : t > 50 ? 'temp-warm' : 'temp-ok';
       parts.push(`<span class="${cls}">${t.toFixed(1)}°C</span>`);
     }
-    if (!parts.length) return '<span class="api-ok">✓ reachable</span>';
-    return '<div class="ping-api-info">' + parts.join('<span class="api-sep">&nbsp;·&nbsp;</span>') + '</div>';
+    if (!parts.length) return api.reachable ? '<span class="api-ok">✓ reachable</span>' : '<span class="cell-na">—</span>';
+
+    const cls   = api.stale ? 'ping-api-info ping-api-info--stale' : 'ping-api-info';
+    const title = api.stale ? ` title="Cached — last confirmed ${api.lastSeenAt ? esc(api.lastSeenAt) : 'unknown'}"` : '';
+    const tag   = api.stale ? '<span class="api-stale-tag">cached</span>' : '';
+    return `<div class="${cls}"${title}>` + parts.join('<span class="api-sep">&nbsp;·&nbsp;</span>') + tag + '</div>';
   }
 
   function buildMiniHist(history) {

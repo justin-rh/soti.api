@@ -45,9 +45,28 @@ db.exec(`
     latency  INTEGER,
     checked  TEXT
   );
+  CREATE TABLE IF NOT EXISTS reader_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS idx_cal_device ON calibration_events(device_id);
   CREATE INDEX IF NOT EXISTS idx_cal_time   ON calibration_events(triggered_at);
 `);
+
+// Migrate reader_host_state to add cached reader-API columns (firmware survives offline checks)
+{
+  const existingCols = db.prepare("PRAGMA table_info(reader_host_state)").all().map((c) => c.name);
+  const addCol = (name, def) => {
+    if (!existingCols.includes(name)) db.exec(`ALTER TABLE reader_host_state ADD COLUMN ${name} ${def}`);
+  };
+  addCol('firmware',        'TEXT');
+  addCol('serial',          'TEXT');
+  addCol('model',           'TEXT');
+  addCol('antennas_total',  'INTEGER');
+  addCol('antennas_active', 'INTEGER');
+  addCol('temperature',     'REAL');
+  addCol('api_seen_at',     'TEXT');
+}
 
 const stmt = {
   getVoidState:       db.prepare('SELECT * FROM device_void_state WHERE device_id = ?'),
@@ -68,15 +87,30 @@ const stmt = {
   getAllCalibrations:  db.prepare('SELECT * FROM calibration_events ORDER BY triggered_at DESC LIMIT 200'),
   loadReaderState:    db.prepare('SELECT * FROM reader_host_state'),
   upsertReaderState:  db.prepare(`
-    INSERT INTO reader_host_state (addr, label, status, ever_up, history, latency, checked)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO reader_host_state (
+      addr, label, status, ever_up, history, latency, checked,
+      firmware, serial, model, antennas_total, antennas_active, temperature, api_seen_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(addr) DO UPDATE SET
-      label   = excluded.label,
-      status  = excluded.status,
-      ever_up = excluded.ever_up,
-      history = excluded.history,
-      latency = excluded.latency,
-      checked = excluded.checked
+      label           = excluded.label,
+      status          = excluded.status,
+      ever_up         = excluded.ever_up,
+      history         = excluded.history,
+      latency         = excluded.latency,
+      checked         = excluded.checked,
+      firmware        = excluded.firmware,
+      serial          = excluded.serial,
+      model           = excluded.model,
+      antennas_total  = excluded.antennas_total,
+      antennas_active = excluded.antennas_active,
+      temperature     = excluded.temperature,
+      api_seen_at     = excluded.api_seen_at
+  `),
+  getSetting:    db.prepare('SELECT value FROM reader_settings WHERE key = ?'),
+  upsertSetting: db.prepare(`
+    INSERT INTO reader_settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `),
 };
 
@@ -358,7 +392,7 @@ async function fetchAllMcDevices() {
 let xlsx; // lazy-loaded after npm install
 
 const PING_CHECK_PORTS   = [80, 443, 5084];
-const READER_ENDPOINTS   = ['/api/v1/config/readerConfig', '/api/v1/readerInfo', '/api/v1/status'];
+const READER_ENDPOINTS   = ['/cloud/version', '/cloud/status', '/api/v1/config/readerConfig', '/api/v1/readerInfo', '/api/v1/status'];
 
 const DEFAULT_PING_HOSTS = [
   { addr: '10.180.1.251', label: 'Inventory Joey #1 (Now 54)' },
@@ -406,7 +440,14 @@ const pingState = {
   apiCredentials: { username: 'admin', password: 'change01' },
 };
 
-// Restore persisted reader state from DB
+// Restore persisted credentials and reader state from DB
+(function restoreReaderSettings() {
+  const u = stmt.getSetting.get('api_username');
+  const p = stmt.getSetting.get('api_password');
+  if (u) pingState.apiCredentials.username = u.value;
+  if (p) pingState.apiCredentials.password = p.value;
+})();
+
 (function restoreReaderState() {
   const savedRows = stmt.loadReaderState.all();
   const savedMap  = Object.fromEntries(savedRows.map(r => [r.addr, r]));
@@ -418,8 +459,43 @@ const pingState = {
     h.history = JSON.parse(saved.history || '[]');
     h.latency = saved.latency != null ? saved.latency : null;
     h.checked = saved.checked || null;
+    h.api     = cachedApiFromRow(saved);
   }
 })();
+
+// Rebuild an `api` object from a persisted DB row — used on startup so firmware/serial/etc.
+// from the last successful reader-API check survive a server restart.
+function cachedApiFromRow(saved) {
+  const hasCached = !!(saved.firmware || saved.model || saved.serial || saved.antennas_total != null);
+  if (!hasCached) return {};
+  return {
+    reachable:       false,
+    auth_error:      false,
+    firmware:        saved.firmware || null,
+    serial:          saved.serial || null,
+    model:           saved.model || null,
+    antennas_total:  saved.antennas_total != null ? saved.antennas_total : null,
+    antennas_active: saved.antennas_active != null ? saved.antennas_active : null,
+    temperature:     saved.temperature != null ? saved.temperature : null,
+    stale:           true,
+    lastSeenAt:      saved.api_seen_at || null,
+  };
+}
+
+// Merge a fresh reader-API result with the previously cached one — keep last-known
+// firmware/serial/model/antennas/temperature across offline checks instead of
+// blanking them out, but always reflect the current reachable/auth_error state.
+function mergeApiResult(prevApi, freshApi) {
+  const merged = { ...freshApi };
+  const cachedFields = ['firmware', 'serial', 'model', 'antennas_total', 'antennas_active', 'temperature'];
+  for (const f of cachedFields) {
+    if (merged[f] == null && prevApi && prevApi[f] != null) merged[f] = prevApi[f];
+  }
+  const hasCached = cachedFields.some((f) => merged[f] != null);
+  merged.stale      = !freshApi.reachable && hasCached;
+  merged.lastSeenAt = freshApi.reachable ? new Date().toISOString() : ((prevApi && prevApi.lastSeenAt) || null);
+  return merged;
+}
 
 function pingHost(addr) {
   return new Promise((resolve) => {
@@ -458,18 +534,23 @@ async function checkAllPorts(addr) {
 function md5hex(str) { return crypto.createHash('md5').update(str).digest('hex'); }
 
 function buildDigestAuth(method, uri, username, password, wwwAuth) {
-  const realm  = wwwAuth.match(/realm="([^"]+)"/)?.[1]    || '';
-  const nonce  = wwwAuth.match(/nonce="([^"]+)"/)?.[1]    || '';
-  const qop    = wwwAuth.match(/qop="?([^",\s]+)/)?.[1]   || '';
-  const nc     = '00000001';
-  const cnonce = crypto.randomBytes(8).toString('hex');
-  const ha1    = md5hex(`${username}:${realm}:${password}`);
-  const ha2    = md5hex(`${method}:${uri}`);
-  const resp   = qop === 'auth'
+  const realm     = wwwAuth.match(/realm="([^"]+)"/)?.[1]    || '';
+  const nonce     = wwwAuth.match(/nonce="([^"]+)"/)?.[1]    || '';
+  const qop       = wwwAuth.match(/qop="?([^",\s]+)/)?.[1]   || '';
+  const opaque    = wwwAuth.match(/opaque="([^"]+)"/)?.[1]   || '';
+  const algorithm = wwwAuth.match(/algorithm=([^\s,]+)/i)?.[1] || 'MD5';
+  const nc        = '00000001';
+  const cnonce    = crypto.randomBytes(8).toString('hex');
+  let ha1 = md5hex(`${username}:${realm}:${password}`);
+  if (algorithm.toUpperCase() === 'MD5-SESS')
+    ha1 = md5hex(`${ha1}:${nonce}:${cnonce}`);
+  const ha2  = md5hex(`${method}:${uri}`);
+  const resp = qop === 'auth' || qop === 'auth-int'
     ? md5hex(`${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`)
     : md5hex(`${ha1}:${nonce}:${ha2}`);
   let h = `Digest username="${username}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${resp}"`;
-  if (qop) h += `, qop=${qop}, nc=${nc}, cnonce="${cnonce}"`;
+  if (qop)    h += `, qop=${qop}, nc=${nc}, cnonce="${cnonce}"`;
+  if (opaque) h += `, opaque="${opaque}"`;
   return h;
 }
 
@@ -486,19 +567,111 @@ function rawHttpGet(url, headers) {
   });
 }
 
+function rawHttpPost(url, body, headers) {
+  return new Promise((resolve, reject) => {
+    const mod    = url.startsWith('https') ? https : http;
+    const u      = new URL(url);
+    const opts   = {
+      hostname: u.hostname, port: u.port || (url.startsWith('https') ? 443 : 80),
+      path: u.pathname + u.search, method: 'POST',
+      headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
+      rejectUnauthorized: false,
+    };
+    const req = mod.request(opts, (res) => {
+      let data = '';
+      res.on('data', d => data += d);
+      res.on('end', () => resolve({ status: res.statusCode, body: data, headers: res.headers }));
+    });
+    req.on('error', reject);
+    req.setTimeout(5000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// Login candidates for Zebra RFID readers (FXR90 / CloudConnect)
+const LOGIN_CANDIDATES = [
+  // Zebra CloudConnect — GET with HTTP Basic auth header (confirmed working on FXR90)
+  { path: '/cloud/localRestLogin', method: 'get',
+    authFn: (u, p) => 'Basic ' + Buffer.from(`${u}:${p}`).toString('base64') },
+  // Zebra CloudConnect — form-encoded (most common)
+  { path: '/cloud/localRestLogin', method: 'post', ct: 'application/x-www-form-urlencoded',
+    bodyFn: (u, p) => `username=${encodeURIComponent(u)}&password=${encodeURIComponent(p)}` },
+  // Zebra CloudConnect — JSON variant
+  { path: '/cloud/localRestLogin', method: 'post', ct: 'application/json',
+    bodyFn: (u, p) => JSON.stringify({ username: u, password: p }) },
+  // Zebra CloudConnect — Basic auth header on the POST, empty body
+  { path: '/cloud/localRestLogin', method: 'post', ct: 'application/json', bodyFn: () => '',
+    authFn: (u, p) => 'Basic ' + Buffer.from(`${u}:${p}`).toString('base64') },
+  // Standard REST login paths — JSON
+  { path: '/api/v1/auth/login',  method: 'post', ct: 'application/json', bodyFn: (u, p) => JSON.stringify({ username: u, password: p }) },
+  { path: '/api/v1/login',       method: 'post', ct: 'application/json', bodyFn: (u, p) => JSON.stringify({ username: u, password: p }) },
+  { path: '/api/v1/user/login',  method: 'post', ct: 'application/json', bodyFn: (u, p) => JSON.stringify({ username: u, password: p }) },
+];
+
+async function tryTokenLogin(scheme, addr, username, password) {
+  for (const c of LOGIN_CANDIDATES) {
+    const url  = `${scheme}://${addr}${c.path}`;
+    const hdrs = { Accept: 'application/json' };
+    if (c.ct)     hdrs['Content-Type']  = c.ct;
+    if (c.authFn) hdrs['Authorization'] = c.authFn(username, password);
+    try {
+      const r = c.method === 'get'
+        ? await rawHttpGet(url, hdrs)
+        : await rawHttpPost(url, c.bodyFn(username, password), hdrs);
+      if (r.status === 200) {
+        try {
+          const data = JSON.parse(r.body);
+          // Zebra CloudConnect returns { code: 0, message: "<jwt>" } on success
+          const token = data.token || data.access_token || data.authToken || data.sessionToken || data.bearerToken
+            || (data.code === 0 && typeof data.message === 'string' ? data.message : null);
+          if (token) return { type: 'bearer', value: `Bearer ${token}` };
+        } catch (_) {}
+        const setCookie = r.headers['set-cookie'];
+        if (setCookie) {
+          const cookieVal = (Array.isArray(setCookie) ? setCookie[0] : setCookie).split(';')[0].trim();
+          if (cookieVal) return { type: 'cookie', value: cookieVal };
+        }
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
 function parseZebraBody(data, out) {
   const cfg  = data.readerConfig || data;
   const info = cfg.readerInfo || cfg.reader || data.readerInfo || {};
-  out.firmware = info.firmwareVersion || info.firmware || cfg.firmwareVersion || data.firmwareVersion || null;
-  out.serial   = info.serialNumber   || info.serial   || cfg.serialNumber   || null;
-  out.model    = info.model          || info.name     || cfg.model          || null;
-  const temp = cfg.temperature || info.temperature || data.temperature;
-  if (temp != null) { try { out.temperature = parseFloat(temp); } catch(_) {} }
-  const ants = cfg.antennas || cfg.antennaConfigurations || data.antennas || [];
-  if (Array.isArray(ants) && ants.length) {
-    out.antennas_total  = ants.length;
-    const active = ants.filter(a => a.status === 'connected' || a.isEnabled === true || a.enabled === true).length;
-    out.antennas_active = active || null;
+
+  // Merge across endpoints — only overwrite a field when this body actually has it,
+  // since /cloud/status and /cloud/version each carry a different subset.
+  const firmware = info.firmwareVersion || info.firmware || cfg.firmwareVersion || data.firmwareVersion
+    || data.readerApplication || null;
+  if (firmware) out.firmware = firmware;
+
+  const serial = info.serialNumber || info.serial || cfg.serialNumber || data.serialNumber || null;
+  if (serial) out.serial = serial;
+
+  const model = info.model || info.name || cfg.model || data.model || null;
+  if (model) out.model = model;
+
+  const temp = cfg.temperature ?? info.temperature ?? data.temperature;
+  if (temp != null) {
+    const t = parseFloat(temp);
+    if (!Number.isNaN(t)) out.temperature = t;
+  }
+
+  // Zebra CloudConnect /cloud/status returns antennas as an object keyed by antenna
+  // number (e.g. { "1": "connected", "2": "disconnected" }), not an array.
+  const antsRaw = cfg.antennas || cfg.antennaConfigurations || data.antennas;
+  if (Array.isArray(antsRaw) && antsRaw.length) {
+    out.antennas_total  = antsRaw.length;
+    out.antennas_active = antsRaw.filter(a => a.status === 'connected' || a.isEnabled === true || a.enabled === true).length || null;
+  } else if (antsRaw && typeof antsRaw === 'object') {
+    const values = Object.values(antsRaw);
+    if (values.length) {
+      out.antennas_total  = values.length;
+      out.antennas_active = values.filter(v => v === 'connected').length || null;
+    }
   }
 }
 
@@ -510,26 +683,49 @@ async function fetchReaderApi(addr) {
     antennas_total: null, antennas_active: null, temperature: null,
   };
   for (const scheme of ['https', 'http']) {
+    // Try token/session login first
+    const session = await tryTokenLogin(scheme, addr, username, password);
+    let gotData = false;
+
+    // Query every known endpoint and merge — different endpoints carry different
+    // fields (e.g. /cloud/version has firmware, /cloud/status has antennas/temp).
     for (const endpoint of READER_ENDPOINTS) {
-      const url   = `${scheme}://${addr}${endpoint}`;
-      const basic = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
+      const url = `${scheme}://${addr}${endpoint}`;
+      // Build request headers based on auth method available
+      const headers = { Accept: 'application/json' };
+      if (session && session.type === 'bearer') headers['Authorization'] = session.value;
+      else if (session && session.type === 'cookie') headers['Cookie'] = session.value;
+      else headers['Authorization'] = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
+
       try {
-        let res = await rawHttpGet(url, { Authorization: basic, Accept: 'application/json' });
+        let res = await rawHttpGet(url, headers);
+
+        // If token auth failed, fall back to HTTP Basic / Digest
+        if (res.status === 401 && session) {
+          headers['Authorization'] = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
+          delete headers['Cookie'];
+          res = await rawHttpGet(url, headers);
+        }
+
         if (res.status === 401) {
           const wwwAuth = res.headers['www-authenticate'] || '';
           if (wwwAuth.toLowerCase().includes('digest')) {
             const dig = buildDigestAuth('GET', endpoint, username, password, wwwAuth);
             res = await rawHttpGet(url, { Authorization: dig, Accept: 'application/json' });
           }
-          if (res.status === 401) { out.reachable = true; out.auth_error = true; return out; }
+          if (res.status === 401) { out.reachable = true; if (!gotData) out.auth_error = true; continue; }
         }
+
         if (res.status === 200) {
-          out.reachable = true;
+          out.reachable  = true;
+          out.auth_error = false;
+          gotData = true;
           try { parseZebraBody(JSON.parse(res.body), out); } catch(_) {}
-          return out;
         }
       } catch(_) { break; }
     }
+
+    if (out.reachable) return out;
   }
   return out;
 }
@@ -549,7 +745,7 @@ async function checkSingleHost(hid) {
   if (!h) return;
   h.status = 'pending';
   const [{ up, latency }, ports] = await Promise.all([pingHost(h.addr), checkAllPorts(h.addr)]);
-  const api = (ports['80'] || ports['443']) ? await fetchReaderApi(h.addr) : { reachable: false };
+  const freshApi = (ports['80'] || ports['443']) ? await fetchReaderApi(h.addr) : { reachable: false };
   const target = pingState.hosts.find(x => x.id === hid);
   if (!target) return;
   target.status  = up ? 'up' : 'down';
@@ -558,11 +754,16 @@ async function checkSingleHost(hid) {
   target.history = [...target.history, up ? 'up' : 'down'].slice(-10);
   if (up) target.ever_up = true;
   target.ports   = ports;
-  target.api     = api;
+  target.api     = mergeApiResult(target.api, freshApi);
   stmt.upsertReaderState.run(
     target.addr, target.label || '', target.status,
     target.ever_up ? 1 : 0, JSON.stringify(target.history),
-    target.latency, target.checked
+    target.latency, target.checked,
+    target.api.firmware || null, target.api.serial || null, target.api.model || null,
+    target.api.antennas_total != null ? target.api.antennas_total : null,
+    target.api.antennas_active != null ? target.api.antennas_active : null,
+    target.api.temperature != null ? target.api.temperature : null,
+    target.api.lastSeenAt || null
   );
 }
 
@@ -814,10 +1015,64 @@ app.post('/api/ping/settings', (req, res) => {
   const { auto_enabled, auto_interval, api_username, api_password } = req.body;
   if (auto_enabled  !== undefined) pingState.autoEnabled  = Boolean(auto_enabled);
   if (auto_interval !== undefined) pingState.autoInterval = parseInt(auto_interval) || 5;
-  if (api_username  !== undefined) pingState.apiCredentials.username = api_username;
-  if (api_password  !== undefined) pingState.apiCredentials.password = api_password;
+  if (api_username  !== undefined) {
+    pingState.apiCredentials.username = api_username;
+    stmt.upsertSetting.run('api_username', api_username);
+  }
+  if (api_password  !== undefined) {
+    pingState.apiCredentials.password = api_password;
+    stmt.upsertSetting.run('api_password', api_password);
+  }
   schedulePingRun();
   res.json({ ok: true });
+});
+
+app.get('/api/ping/probe-debug/:addr', async (req, res) => {
+  const username = req.query.username || pingState.apiCredentials.username;
+  const password = req.query.password || pingState.apiCredentials.password;
+  const addr     = req.params.addr;
+  const passwordHint = password.length > 2 ? password[0] + '*'.repeat(password.length - 2) + password.slice(-1) : '**';
+  const output  = { addr, username, passwordHint, discovery: [], loginAttempts: [], probeResults: [] };
+
+  // Discovery: GET various paths with no auth to see what's exposed
+  const discoverPaths = ['/', '/cloud/', '/api/', '/api/v1/', '/cloud/localRestLogin',
+    '/api/v1/readerInfo', '/api/v1/status', '/api/v1/mgmt/readerInfo', '/api/v1/mgmt/status',
+    '/api/v1/reader/info', '/api/v1/reader/status', '/data/readerinfo.json'];
+  for (const p of discoverPaths) {
+    const url = `https://${addr}${p}`;
+    try {
+      const r = await rawHttpGet(url, { Accept: 'application/json, text/html' });
+      output.discovery.push({ path: p, status: r.status, contentType: r.headers['content-type'] || null, bodySnippet: r.body.slice(0, 150) });
+    } catch (e) { output.discovery.push({ path: p, error: e.message }); }
+  }
+
+  for (const scheme of ['https', 'http']) {
+    const loginResults = [];
+    const basicHdr = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
+    // All body/header variants + query-param variant
+    const attempts = [
+      { label: 'POST form-encoded',   method: 'post', url: `${scheme}://${addr}/cloud/localRestLogin`, body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`, ct: 'application/x-www-form-urlencoded' },
+      { label: 'POST JSON',           method: 'post', url: `${scheme}://${addr}/cloud/localRestLogin`, body: JSON.stringify({ username, password }), ct: 'application/json' },
+      { label: 'POST Basic header',   method: 'post', url: `${scheme}://${addr}/cloud/localRestLogin`, body: '', ct: 'application/json', auth: basicHdr },
+      { label: 'POST query params',   method: 'post', url: `${scheme}://${addr}/cloud/localRestLogin?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`, body: '', ct: 'application/json' },
+      { label: 'GET query params',    method: 'get',  url: `${scheme}://${addr}/cloud/localRestLogin?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}` },
+      { label: 'GET Basic header',    method: 'get',  url: `${scheme}://${addr}/cloud/localRestLogin`, auth: basicHdr },
+    ];
+    for (const a of attempts) {
+      try {
+        let r;
+        const hdrs = { Accept: 'application/json' };
+        if (a.auth) hdrs['Authorization'] = a.auth;
+        if (a.method === 'post') { hdrs['Content-Type'] = a.ct; r = await rawHttpPost(a.url, a.body, hdrs); }
+        else                     { r = await rawHttpGet(a.url, hdrs); }
+        loginResults.push({ label: a.label, status: r.status, bodySnippet: r.body.slice(0, 200), setCookie: r.headers['set-cookie'] || null });
+      } catch (e) { loginResults.push({ label: a.label, error: e.message }); }
+    }
+    output.loginAttempts.push({ scheme, results: loginResults });
+    if (scheme === 'http') break; // HTTP always fails (port 80 closed), skip for brevity
+  }
+
+  res.json(output);
 });
 
 app.get('/api/ping/export/csv', (req, res) => {
