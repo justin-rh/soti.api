@@ -395,7 +395,7 @@ async function fetchAllMcDevices() {
 
 let xlsx; // lazy-loaded after npm install
 
-const PING_CHECK_PORTS   = [80, 443, 5084];
+const PING_CHECK_PORTS   = [443, 5084];
 const READER_ENDPOINTS   = ['/cloud/version', '/cloud/status', '/api/v1/config/readerConfig', '/api/v1/readerInfo', '/api/v1/status'];
 
 const DEFAULT_PING_HOSTS = [
@@ -749,7 +749,7 @@ async function checkSingleHost(hid) {
   if (!h) return;
   h.status = 'pending';
   const [{ up, latency }, ports] = await Promise.all([pingHost(h.addr), checkAllPorts(h.addr)]);
-  const freshApi = (ports['80'] || ports['443']) ? await fetchReaderApi(h.addr) : { reachable: false };
+  const freshApi = ports['443'] ? await fetchReaderApi(h.addr) : { reachable: false };
   const target = pingState.hosts.find(x => x.id === hid);
   if (!target) return;
   target.status  = up ? 'up' : 'down';
@@ -1080,7 +1080,7 @@ app.get('/api/ping/probe-debug/:addr', async (req, res) => {
 });
 
 app.get('/api/ping/export/csv', (req, res) => {
-  const lines = ['Host,Name,Status,Latency (ms),Last Checked,Port 80,Port 443,Port 5084,Firmware,Serial,Model,Antennas,Temp (C),History'];
+  const lines = ['Host,Name,Status,Latency (ms),Last Checked,Port 443,Port 5084,Firmware,Serial,Model,Antennas,Temp (C),History'];
   for (const h of pingState.hosts) {
     const p  = h.ports || {};
     const a  = h.api   || {};
@@ -1091,7 +1091,7 @@ app.get('/api/ping/export/csv', (req, res) => {
     lines.push([
       h.addr, h.label || '', h.status,
       h.latency != null ? h.latency : '', h.checked || '',
-      ps(80), ps(443), ps(5084),
+      ps(443), ps(5084),
       a.firmware || '', a.serial || '', a.model || '',
       ants, a.temperature != null ? a.temperature : '',
       h.history.join(' '),

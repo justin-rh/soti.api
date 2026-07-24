@@ -281,13 +281,28 @@
     connect.el.tableBody.appendChild(frag);
   }
 
+  function simplePrintBaseUrl() {
+    if (!connect.simplePrintUrl) return null;
+    try {
+      const u = new URL(connect.simplePrintUrl);
+      // The Simple Print helper runs alongside whatever machine is viewing the
+      // dashboard, so route to it using the host the page was loaded from
+      // (localhost or an IP) rather than whatever host is baked into the config.
+      u.hostname = window.location.hostname;
+      return u.toString().replace(/\/$/, '');
+    } catch (_) {
+      return connect.simplePrintUrl;
+    }
+  }
+
   function buildConnectRow(d) {
     const tr = document.createElement('tr');
     if (d.connectionStatus !== 1) tr.classList.add('row-offline');
     if (d.hasAlert)                tr.classList.add('row-alert');
 
-    const printHref = connect.simplePrintUrl && d.ip
-      ? `${connect.simplePrintUrl}?labelName=${encodeURIComponent(d.name)}&ip=${encodeURIComponent(d.ip)}`
+    const printBase = simplePrintBaseUrl();
+    const printHref = printBase && d.ip
+      ? `${printBase}?labelName=${encodeURIComponent(d.name)}&ip=${encodeURIComponent(d.ip)}`
       : null;
 
     tr.innerHTML = [
@@ -769,7 +784,7 @@
 
   function buildPortTags(ports) {
     if (!ports || !Object.keys(ports).length) return '<span class="cell-na">—</span>';
-    const defs = [{ p: '80', label: 'HTTP' }, { p: '443', label: 'SSL' }, { p: '5084', label: 'LLRP' }];
+    const defs = [{ p: '443', label: 'SSL' }, { p: '5084', label: 'LLRP' }];
     return '<div class="port-tags">' + defs.map(d => {
       const v   = ports[d.p];
       const cls = v === true ? 'port-open' : v === false ? 'port-closed' : 'port-none';
