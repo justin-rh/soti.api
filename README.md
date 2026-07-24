@@ -73,7 +73,7 @@ MC_USERNAME=your-api-username
 MC_PASSWORD=your-api-password
 
 # Simple Print integration (optional)
-SIMPLE_PRINT_URL=http://localhost:3001
+SIMPLE_PRINT_URL=http://localhost:3002
 ```
 
 > **Never commit `.env`** — it contains credentials.
