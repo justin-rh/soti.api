@@ -561,7 +561,8 @@
           ? `<span class="group-tooltip" title="${esc(d.groupPath)}">${esc(d.group)}</span>`
           : esc(d.group) || '<span class="cell-na">—</span>'}</td>`,
       `<td>${buildStatusBadge(d.isOnline)}</td>`,
-      `<td class="cell-firmware">${esc(d.osVersion) || '<span class="cell-na">—</span>'}</td>`,
+      `<td class="cell-os">${esc(d.osVersion) || '<span class="cell-na">—</span>'}</td>`,
+      `<td class="cell-firmware" title="${esc(d.firmware)}">${esc(d.firmware) || '<span class="cell-na">—</span>'}</td>`,
       `<td class="cell-lastseen">${d.lastCheckIn ? relativeTime(new Date(d.lastCheckIn)) : '<span class="cell-na">—</span>'}</td>`,
       `<td class="cell-mc-user">${esc(d.userName) || '<span class="cell-na">—</span>'}</td>`,
       `<td>${buildComplianceBadge(d.compliance)}</td>`,

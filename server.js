@@ -310,6 +310,9 @@ function processMcDevice(raw) {
   const name        = raw.DeviceName || raw.PersonalizedName || '';
   const platform    = raw.Family || raw.Platform || '';
   const osVersion   = raw.OSVersion || '';
+  // OEMVersion carries the actual device firmware/build string (e.g. Zebra "14-32-12.00-UG-U06-STD-HEL-04");
+  // OSVersion is just the Android major version and isn't specific enough to track firmware updates.
+  const firmware    = raw.OEMVersion || '';
   const serial      = raw.HardwareSerialNumber || raw.MobileSerialNumber || '';
   const ip          = raw.VpnIp || raw.HostName || '';
   const groupPath   = raw.Path || '';
@@ -348,6 +351,7 @@ function processMcDevice(raw) {
     platform,
     model,
     osVersion,
+    firmware,
     serial,
     ip,
     group,
