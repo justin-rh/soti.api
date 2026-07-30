@@ -49,8 +49,17 @@ db.exec(`
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS label_activity_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   INTEGER NOT NULL,
+    device_name TEXT    NOT NULL,
+    recorded_at TEXT    NOT NULL,
+    void_delta  INTEGER NOT NULL DEFAULT 0,
+    valid_delta INTEGER NOT NULL DEFAULT 0
+  );
   CREATE INDEX IF NOT EXISTS idx_cal_device ON calibration_events(device_id);
   CREATE INDEX IF NOT EXISTS idx_cal_time   ON calibration_events(triggered_at);
+  CREATE INDEX IF NOT EXISTS idx_activity_device_time ON label_activity_events(device_id, recorded_at);
 `);
 
 // Migrate reader_host_state to add cached reader-API columns (firmware survives offline checks)
@@ -68,14 +77,23 @@ db.exec(`
   addCol('api_seen_at',     'TEXT');
 }
 
+// Migrate device_void_state to track the valid-label counter too (for print-activity deltas)
+{
+  const cols = db.prepare("PRAGMA table_info(device_void_state)").all().map((c) => c.name);
+  if (!cols.includes('last_valid_count')) {
+    db.exec('ALTER TABLE device_void_state ADD COLUMN last_valid_count INTEGER');
+  }
+}
+
 const stmt = {
   getVoidState:       db.prepare('SELECT * FROM device_void_state WHERE device_id = ?'),
   upsertVoidState:    db.prepare(`
-    INSERT INTO device_void_state (device_id, device_name, last_void_count, updated_at)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO device_void_state (device_id, device_name, last_void_count, last_valid_count, updated_at)
+    VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(device_id) DO UPDATE SET
       device_name      = excluded.device_name,
       last_void_count  = excluded.last_void_count,
+      last_valid_count = excluded.last_valid_count,
       updated_at       = excluded.updated_at
   `),
   insertCalibration:  db.prepare(`
@@ -85,6 +103,26 @@ const stmt = {
   getCalibrationCount: db.prepare('SELECT COUNT(*) as count FROM calibration_events WHERE device_id = ?'),
   getDeviceHistory:   db.prepare('SELECT * FROM calibration_events WHERE device_id = ? ORDER BY triggered_at DESC LIMIT 100'),
   getAllCalibrations:  db.prepare('SELECT * FROM calibration_events ORDER BY triggered_at DESC LIMIT 200'),
+  insertActivity: db.prepare(`
+    INSERT INTO label_activity_events (device_id, device_name, recorded_at, void_delta, valid_delta)
+    VALUES (?, ?, ?, ?, ?)
+  `),
+  getLastActivity: db.prepare(`
+    SELECT recorded_at, void_delta, valid_delta
+    FROM label_activity_events
+    WHERE device_id = ?
+    ORDER BY recorded_at DESC, id DESC
+    LIMIT 1
+  `),
+  getVoidsInWindow: db.prepare(`
+    SELECT COALESCE(SUM(void_delta), 0) AS voids
+    FROM label_activity_events
+    WHERE device_id = ? AND recorded_at >= ?
+  `),
+  getLastVoidAt:  db.prepare('SELECT MAX(recorded_at) AS t FROM label_activity_events WHERE device_id = ? AND void_delta > 0'),
+  getLastValidAt: db.prepare('SELECT MAX(recorded_at) AS t FROM label_activity_events WHERE device_id = ? AND valid_delta > 0'),
+  getLastCalibrationAt: db.prepare('SELECT MAX(triggered_at) AS t FROM calibration_events WHERE device_id = ?'),
+  pruneActivity:  db.prepare('DELETE FROM label_activity_events WHERE recorded_at < ?'),
   loadReaderState:    db.prepare('SELECT * FROM reader_host_state'),
   upsertReaderState:  db.prepare(`
     INSERT INTO reader_host_state (
@@ -114,8 +152,13 @@ const stmt = {
   `),
 };
 
-// Detect void counter resets — each reset = one completed RFID calibration
-function checkCalibrations(devices) {
+// Keep 30 days of label activity history
+stmt.pruneActivity.run(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
+
+// Process one counter sample per device: detect void-counter resets (each
+// reset = one completed RFID calibration) and record label activity deltas
+// for print-activity detection. Must run exactly once per SOTI fetch.
+function recordCounterSample(devices) {
   const now = new Date().toISOString();
   for (const device of devices) {
     if (device.voidCount === null) continue;
@@ -128,7 +171,18 @@ function checkCalibrations(devices) {
       console.log(`[calibration] ${device.name}: void count reset ${prev.last_void_count} → 0`);
     }
 
-    stmt.upsertVoidState.run(device.id, device.name, current, now);
+    if (prev) {
+      // Negative deltas are counter resets (calibration), not print activity.
+      const voidDelta = Math.max(0, current - prev.last_void_count);
+      const validDelta = device.validCount !== null && prev.last_valid_count !== null
+        ? Math.max(0, device.validCount - prev.last_valid_count)
+        : 0;
+      if (voidDelta > 0 || validDelta > 0) {
+        stmt.insertActivity.run(device.id, device.name, now, voidDelta, validDelta);
+      }
+    }
+
+    stmt.upsertVoidState.run(device.id, device.name, current, device.validCount, now);
   }
 }
 
@@ -869,7 +923,7 @@ app.get('/api/devices', async (req, res) => {
     const sorted     = sortDevices(processed);
 
     // Detect calibrations before enriching with counts
-    checkCalibrations(sorted);
+    recordCounterSample(sorted);
 
     const enriched = sorted.map((d) => ({
       ...d,
