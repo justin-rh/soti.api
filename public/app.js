@@ -356,11 +356,19 @@
     return ACTIVITY_RANK[pa.state] ?? 4;
   }
 
+  // relativeTime() returns an HTML fragment (with quoted attributes) for
+  // invalid dates; that's fine when it lands in innerHTML but breaks a
+  // title="" attribute, so the tooltip needs a plain-text fallback instead.
+  function activityTimeLabel(iso) {
+    if (!iso) return 'never';
+    return isNaN(Date.parse(iso)) ? 'unknown' : relativeTime(new Date(iso));
+  }
+
   function buildActivityCell(d) {
     const pa = d.printActivity;
     if (!pa || !pa.state) return '<span class="cell-na">—</span>';
-    const lastVoid  = pa.lastVoidAt  ? relativeTime(new Date(pa.lastVoidAt))  : 'never';
-    const lastValid = pa.lastValidAt ? relativeTime(new Date(pa.lastValidAt)) : 'never';
+    const lastVoid  = activityTimeLabel(pa.lastVoidAt);
+    const lastValid = activityTimeLabel(pa.lastValidAt);
     const tip = `Last void: ${lastVoid} · Last valid label: ${lastValid}`;
     switch (pa.state) {
       case 'voiding':

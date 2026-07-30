@@ -159,10 +159,13 @@ stmt.pruneActivity.run(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOStri
 // Process one counter sample per device: detect void-counter resets (each
 // reset = one completed RFID calibration) and record label activity deltas
 // for print-activity detection. Must run exactly once per SOTI fetch.
-function recordCounterSample(devices) {
+const recordCounterSample = db.transaction((devices) => {
   const now = new Date().toISOString();
   for (const device of devices) {
-    if (device.voidCount === null) continue;
+    // Treat a non-numeric odometer reading the same as a missing one: skip
+    // the device entirely rather than binding NaN (better-sqlite3 turns NaN
+    // into NULL, which violates the NOT NULL columns and aborts the poll).
+    if (device.voidCount === null || !Number.isFinite(device.voidCount)) continue;
 
     const prev = stmt.getVoidState.get(device.id);
     const current = device.voidCount;
@@ -174,8 +177,13 @@ function recordCounterSample(devices) {
 
     if (prev) {
       // Negative deltas are counter resets (calibration), not print activity.
-      const voidDelta = Math.max(0, current - prev.last_void_count);
-      const validDelta = device.validCount !== null && prev.last_valid_count !== null
+      // Number.isFinite guards catch a NaN void/valid count so no event is
+      // recorded for an unparseable sample.
+      const voidDelta = Number.isFinite(current) && Number.isFinite(prev.last_void_count)
+        ? Math.max(0, current - prev.last_void_count)
+        : 0;
+      const validDelta = device.validCount !== null && Number.isFinite(device.validCount)
+        && prev.last_valid_count !== null && Number.isFinite(prev.last_valid_count)
         ? Math.max(0, device.validCount - prev.last_valid_count)
         : 0;
       if (voidDelta > 0 || validDelta > 0) {
@@ -185,7 +193,7 @@ function recordCounterSample(devices) {
 
     stmt.upsertVoidState.run(device.id, device.name, current, device.validCount, now);
   }
-}
+});
 
 // Compute the Print Activity verdict for one device from stored events.
 function getPrintActivity(deviceId, hasCounters) {
