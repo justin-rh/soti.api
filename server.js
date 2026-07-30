@@ -8,6 +8,7 @@ const https    = require('https');
 const http     = require('http');
 const crypto   = require('crypto');
 const fs       = require('fs');
+const { computePrintActivity, DEFAULT_WINDOW_MS } = require('./lib/print-activity');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -186,6 +187,21 @@ function recordCounterSample(devices) {
   }
 }
 
+// Compute the Print Activity verdict for one device from stored events.
+function getPrintActivity(deviceId, hasCounters) {
+  if (!hasCounters) return null;
+  const nowMs = Date.now();
+  const windowStart = new Date(nowMs - DEFAULT_WINDOW_MS).toISOString();
+  return computePrintActivity({
+    lastEvent:         stmt.getLastActivity.get(deviceId) || null,
+    voidsInWindow:     stmt.getVoidsInWindow.get(deviceId, windowStart).voids,
+    lastVoidAt:        stmt.getLastVoidAt.get(deviceId).t,
+    lastValidAt:       stmt.getLastValidAt.get(deviceId).t,
+    lastCalibrationAt: stmt.getLastCalibrationAt.get(deviceId).t,
+    now: nowMs,
+  });
+}
+
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
 let tokenCache = { accessToken: null, expiresAt: null };
@@ -310,6 +326,55 @@ async function fetchDevices() {
   const raw = await res.json();
   return Array.isArray(raw) ? raw : [];
 }
+
+// ─── SOTI Connect poller & cache ──────────────────────────────────────────────
+// The server samples SOTI Connect on its own timer so void detection keeps
+// working when nobody has the dashboard open. /api/devices serves this cache.
+
+const CONNECT_POLL_MS      = 60 * 1000;
+const CONNECT_CACHE_MAX_MS = 10 * 1000;
+
+let connectCache    = { payload: null, fetchedAt: 0 };
+let connectInFlight = null;
+
+function refreshConnectDevices() {
+  if (connectInFlight) return connectInFlight;
+  connectInFlight = (async () => {
+    const rawDevices = await fetchDevices();
+    const processed  = rawDevices.map(processDevice);
+    const sorted     = sortDevices(processed);
+
+    recordCounterSample(sorted);
+
+    const enriched = sorted.map((d) => ({
+      ...d,
+      calibrationCount: d.voidCount !== null
+        ? stmt.getCalibrationCount.get(d.id).count
+        : null,
+      printActivity: getPrintActivity(d.id, d.voidCount !== null),
+    }));
+
+    const online  = enriched.filter((d) => d.connectionStatus === 1).length;
+    const offline = enriched.filter((d) => d.connectionStatus !== 1).length;
+    const alerts  = enriched.filter((d) => d.hasAlert).length;
+
+    connectCache = {
+      payload: {
+        summary: { total: enriched.length, online, offline, alerts },
+        devices: enriched,
+        lastUpdated: new Date().toISOString(),
+      },
+      fetchedAt: Date.now(),
+    };
+    return connectCache.payload;
+  })().finally(() => { connectInFlight = null; });
+  return connectInFlight;
+}
+
+setInterval(() => {
+  refreshConnectDevices().catch((err) => console.error('[connect-poll]', err.message));
+}, CONNECT_POLL_MS);
+refreshConnectDevices().catch((err) => console.error('[connect-poll] initial fetch:', err.message));
 
 // ─── MobiControl ──────────────────────────────────────────────────────────────
 
@@ -918,29 +983,16 @@ app.get('/api/config', (req, res) => {
 
 app.get('/api/devices', async (req, res) => {
   try {
-    const rawDevices = await fetchDevices();
-    const processed  = rawDevices.map(processDevice);
-    const sorted     = sortDevices(processed);
-
-    // Detect calibrations before enriching with counts
-    recordCounterSample(sorted);
-
-    const enriched = sorted.map((d) => ({
-      ...d,
-      calibrationCount: d.voidCount !== null
-        ? stmt.getCalibrationCount.get(d.id).count
-        : null,
-    }));
-
-    const online  = enriched.filter((d) => d.connectionStatus === 1).length;
-    const offline = enriched.filter((d) => d.connectionStatus !== 1).length;
-    const alerts  = enriched.filter((d) => d.hasAlert).length;
-
-    res.json({
-      summary: { total: enriched.length, online, offline, alerts },
-      devices: enriched,
-      lastUpdated: new Date().toISOString(),
-    });
+    if (Date.now() - connectCache.fetchedAt > CONNECT_CACHE_MAX_MS) {
+      try {
+        await refreshConnectDevices();
+      } catch (err) {
+        // SOTI unreachable: serve the previous snapshot if we have one.
+        if (!connectCache.payload) throw err;
+        console.error('[/api/devices] refresh failed, serving cached data:', err.message);
+      }
+    }
+    res.json(connectCache.payload);
   } catch (err) {
     console.error('[/api/devices]', err.message);
     res.status(500).json({ error: err.message });
