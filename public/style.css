@@ -562,6 +562,12 @@ th.sort-asc .sort-icon, th.sort-desc .sort-icon {
 .rfid-void-high { color: var(--color-offline);    font-weight: 700; }
 .rfid-cal-count { font-size: 0.75rem; color: var(--color-text-light); font-weight: 400; }
 
+.cell-activity { white-space: nowrap; font-size: 0.8rem; }
+.badge--voiding  { background: var(--color-offline-bg); color: var(--color-offline); }
+.badge--print-ok { background: var(--color-online-bg);  color: var(--color-online); }
+.activity-idle   { color: var(--color-text-muted); }
+.activity-idle-v { color: var(--color-offline); font-weight: 700; }
+
 .cell-actions { white-space: nowrap; }
 
 .btn-action {
