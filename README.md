@@ -5,7 +5,7 @@ Internal operations dashboard for monitoring RFID readers, portal availability, 
 ## Tabs
 
 ### SOTI Connect
-Displays all printers managed by SOTI Connect with status, battery, firmware, group, alerts, and RFID void/calibration counts. Supports search, filter by status/group, sortable columns, and per-device actions (Check In / Test Print).
+Displays all printers managed by SOTI Connect with status, battery, firmware, group, alerts, RFID void/calibration counts, and a live **Activity** verdict (VOIDING / OK / Idle / Idle (V)) derived from RFID odometer deltas. The server polls SOTI Connect every 60 s in the background, so void detection keeps running with no browser open. A printer shows **VOIDING** when its most recent label activity is void-only within the last 15 minutes; valid labels printing clears it immediately. **Idle (V)** flags a printer whose last activity before going quiet was voids — likely abandoned in a non-working state — until valid labels print or a calibration reset occurs. Supports search, filter by status/group, sortable columns, and per-device actions (Check In / Test Print).
 
 ### MobiControl
 Shows all MDM-enrolled devices from MobiControl with online/offline status, OS version, compliance state, last check-in, and assigned user. Filterable by platform, status, compliance, and group.
@@ -82,7 +82,7 @@ SIMPLE_PRINT_URL=http://localhost:3002
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/devices` | SOTI Connect printers |
+| GET | `/api/devices` | SOTI Connect printers (served from 60 s background poll cache, incl. `printActivity`) |
 | POST | `/api/devices/:id/action` | Trigger printer action |
 | GET | `/api/mc/devices` | MobiControl devices |
 | GET | `/api/ping/hosts` | Reader host list + status |

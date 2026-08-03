@@ -248,6 +248,7 @@
     return [...devices].sort((a, b) => {
       let va = a[connect.sort.key];
       let vb = b[connect.sort.key];
+      if (connect.sort.key === 'printActivity') { va = activityRank(a.printActivity); vb = activityRank(b.printActivity); }
       if (va == null && vb == null) return 0;
       if (va == null) return 1;
       if (vb == null) return -1;
@@ -317,6 +318,7 @@
       `<td class="cell-description">${esc(d.description) || '<span class="cell-na">—</span>'}</td>`,
       `<td>${buildAlertCell(d)}</td>`,
       `<td class="cell-rfid">${buildRfidCell(d)}</td>`,
+      `<td class="cell-activity">${buildActivityCell(d)}</td>`,
       `<td class="cell-actions">${buildConnectActionButtons(d)}</td>`,
     ].join('');
     return tr;
@@ -345,6 +347,39 @@
       ? ` <span class="rfid-cal-count" title="${d.calibrationCount} calibration${d.calibrationCount !== 1 ? 's' : ''} logged">${d.calibrationCount} cal.</span>`
       : '';
     return `<span class="${voidCls}" title="${d.voidCount} void label${d.voidCount !== 1 ? 's' : ''} since last calibration">${d.voidCount} void</span>${calPart}`;
+  }
+
+  const ACTIVITY_RANK = { voiding: 0, idle_voiding: 1, ok: 2, idle: 3 };
+
+  function activityRank(pa) {
+    if (!pa || !pa.state) return 4;
+    return ACTIVITY_RANK[pa.state] ?? 4;
+  }
+
+  // relativeTime() returns an HTML fragment (with quoted attributes) for
+  // invalid dates; that's fine when it lands in innerHTML but breaks a
+  // title="" attribute, so the tooltip needs a plain-text fallback instead.
+  function activityTimeLabel(iso) {
+    if (!iso) return 'never';
+    return isNaN(Date.parse(iso)) ? 'unknown' : relativeTime(new Date(iso));
+  }
+
+  function buildActivityCell(d) {
+    const pa = d.printActivity;
+    if (!pa || !pa.state) return '<span class="cell-na">—</span>';
+    const lastVoid  = activityTimeLabel(pa.lastVoidAt);
+    const lastValid = activityTimeLabel(pa.lastValidAt);
+    const tip = `Last void: ${lastVoid} · Last valid label: ${lastValid}`;
+    switch (pa.state) {
+      case 'voiding':
+        return `<span class="badge badge--voiding" title="${tip}">VOIDING · ${pa.voidsInWindow} in 15m</span>`;
+      case 'ok':
+        return `<span class="badge badge--print-ok" title="${tip}">OK · printing</span>`;
+      case 'idle_voiding':
+        return `<span class="activity-idle" title="Stopped while voiding — no valid labels since. ${tip}">Idle <span class="activity-idle-v">(V)</span></span>`;
+      default:
+        return `<span class="activity-idle" title="${tip}">Idle</span>`;
+    }
   }
 
   function buildConnectActionButtons(d) {

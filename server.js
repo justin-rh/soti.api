@@ -8,6 +8,7 @@ const https    = require('https');
 const http     = require('http');
 const crypto   = require('crypto');
 const fs       = require('fs');
+const { computePrintActivity, DEFAULT_WINDOW_MS } = require('./lib/print-activity');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -49,8 +50,17 @@ db.exec(`
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS label_activity_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   INTEGER NOT NULL,
+    device_name TEXT    NOT NULL,
+    recorded_at TEXT    NOT NULL,
+    void_delta  INTEGER NOT NULL DEFAULT 0,
+    valid_delta INTEGER NOT NULL DEFAULT 0
+  );
   CREATE INDEX IF NOT EXISTS idx_cal_device ON calibration_events(device_id);
   CREATE INDEX IF NOT EXISTS idx_cal_time   ON calibration_events(triggered_at);
+  CREATE INDEX IF NOT EXISTS idx_activity_device_time ON label_activity_events(device_id, recorded_at);
 `);
 
 // Migrate reader_host_state to add cached reader-API columns (firmware survives offline checks)
@@ -68,14 +78,23 @@ db.exec(`
   addCol('api_seen_at',     'TEXT');
 }
 
+// Migrate device_void_state to track the valid-label counter too (for print-activity deltas)
+{
+  const cols = db.prepare("PRAGMA table_info(device_void_state)").all().map((c) => c.name);
+  if (!cols.includes('last_valid_count')) {
+    db.exec('ALTER TABLE device_void_state ADD COLUMN last_valid_count INTEGER');
+  }
+}
+
 const stmt = {
   getVoidState:       db.prepare('SELECT * FROM device_void_state WHERE device_id = ?'),
   upsertVoidState:    db.prepare(`
-    INSERT INTO device_void_state (device_id, device_name, last_void_count, updated_at)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO device_void_state (device_id, device_name, last_void_count, last_valid_count, updated_at)
+    VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(device_id) DO UPDATE SET
       device_name      = excluded.device_name,
       last_void_count  = excluded.last_void_count,
+      last_valid_count = excluded.last_valid_count,
       updated_at       = excluded.updated_at
   `),
   insertCalibration:  db.prepare(`
@@ -85,6 +104,26 @@ const stmt = {
   getCalibrationCount: db.prepare('SELECT COUNT(*) as count FROM calibration_events WHERE device_id = ?'),
   getDeviceHistory:   db.prepare('SELECT * FROM calibration_events WHERE device_id = ? ORDER BY triggered_at DESC LIMIT 100'),
   getAllCalibrations:  db.prepare('SELECT * FROM calibration_events ORDER BY triggered_at DESC LIMIT 200'),
+  insertActivity: db.prepare(`
+    INSERT INTO label_activity_events (device_id, device_name, recorded_at, void_delta, valid_delta)
+    VALUES (?, ?, ?, ?, ?)
+  `),
+  getLastActivity: db.prepare(`
+    SELECT recorded_at, void_delta, valid_delta
+    FROM label_activity_events
+    WHERE device_id = ?
+    ORDER BY recorded_at DESC, id DESC
+    LIMIT 1
+  `),
+  getVoidsInWindow: db.prepare(`
+    SELECT COALESCE(SUM(void_delta), 0) AS voids
+    FROM label_activity_events
+    WHERE device_id = ? AND recorded_at >= ?
+  `),
+  getLastVoidAt:  db.prepare('SELECT MAX(recorded_at) AS t FROM label_activity_events WHERE device_id = ? AND void_delta > 0'),
+  getLastValidAt: db.prepare('SELECT MAX(recorded_at) AS t FROM label_activity_events WHERE device_id = ? AND valid_delta > 0'),
+  getLastCalibrationAt: db.prepare('SELECT MAX(triggered_at) AS t FROM calibration_events WHERE device_id = ?'),
+  pruneActivity:  db.prepare('DELETE FROM label_activity_events WHERE recorded_at < ?'),
   loadReaderState:    db.prepare('SELECT * FROM reader_host_state'),
   upsertReaderState:  db.prepare(`
     INSERT INTO reader_host_state (
@@ -114,11 +153,19 @@ const stmt = {
   `),
 };
 
-// Detect void counter resets — each reset = one completed RFID calibration
-function checkCalibrations(devices) {
+// Keep 30 days of label activity history
+stmt.pruneActivity.run(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString());
+
+// Process one counter sample per device: detect void-counter resets (each
+// reset = one completed RFID calibration) and record label activity deltas
+// for print-activity detection. Must run exactly once per SOTI fetch.
+const recordCounterSample = db.transaction((devices) => {
   const now = new Date().toISOString();
   for (const device of devices) {
-    if (device.voidCount === null) continue;
+    // Treat a non-numeric odometer reading the same as a missing one: skip
+    // the device entirely rather than binding NaN (better-sqlite3 turns NaN
+    // into NULL, which violates the NOT NULL columns and aborts the poll).
+    if (device.voidCount === null || !Number.isFinite(device.voidCount)) continue;
 
     const prev = stmt.getVoidState.get(device.id);
     const current = device.voidCount;
@@ -128,8 +175,39 @@ function checkCalibrations(devices) {
       console.log(`[calibration] ${device.name}: void count reset ${prev.last_void_count} → 0`);
     }
 
-    stmt.upsertVoidState.run(device.id, device.name, current, now);
+    if (prev) {
+      // Negative deltas are counter resets (calibration), not print activity.
+      // Number.isFinite guards catch a NaN void/valid count so no event is
+      // recorded for an unparseable sample.
+      const voidDelta = Number.isFinite(current) && Number.isFinite(prev.last_void_count)
+        ? Math.max(0, current - prev.last_void_count)
+        : 0;
+      const validDelta = device.validCount !== null && Number.isFinite(device.validCount)
+        && prev.last_valid_count !== null && Number.isFinite(prev.last_valid_count)
+        ? Math.max(0, device.validCount - prev.last_valid_count)
+        : 0;
+      if (voidDelta > 0 || validDelta > 0) {
+        stmt.insertActivity.run(device.id, device.name, now, voidDelta, validDelta);
+      }
+    }
+
+    stmt.upsertVoidState.run(device.id, device.name, current, device.validCount, now);
   }
+});
+
+// Compute the Print Activity verdict for one device from stored events.
+function getPrintActivity(deviceId, hasCounters) {
+  if (!hasCounters) return null;
+  const nowMs = Date.now();
+  const windowStart = new Date(nowMs - DEFAULT_WINDOW_MS).toISOString();
+  return computePrintActivity({
+    lastEvent:         stmt.getLastActivity.get(deviceId) || null,
+    voidsInWindow:     stmt.getVoidsInWindow.get(deviceId, windowStart).voids,
+    lastVoidAt:        stmt.getLastVoidAt.get(deviceId).t,
+    lastValidAt:       stmt.getLastValidAt.get(deviceId).t,
+    lastCalibrationAt: stmt.getLastCalibrationAt.get(deviceId).t,
+    now: nowMs,
+  });
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -256,6 +334,55 @@ async function fetchDevices() {
   const raw = await res.json();
   return Array.isArray(raw) ? raw : [];
 }
+
+// ─── SOTI Connect poller & cache ──────────────────────────────────────────────
+// The server samples SOTI Connect on its own timer so void detection keeps
+// working when nobody has the dashboard open. /api/devices serves this cache.
+
+const CONNECT_POLL_MS      = 60 * 1000;
+const CONNECT_CACHE_MAX_MS = 10 * 1000;
+
+let connectCache    = { payload: null, fetchedAt: 0 };
+let connectInFlight = null;
+
+function refreshConnectDevices() {
+  if (connectInFlight) return connectInFlight;
+  connectInFlight = (async () => {
+    const rawDevices = await fetchDevices();
+    const processed  = rawDevices.map(processDevice);
+    const sorted     = sortDevices(processed);
+
+    recordCounterSample(sorted);
+
+    const enriched = sorted.map((d) => ({
+      ...d,
+      calibrationCount: d.voidCount !== null
+        ? stmt.getCalibrationCount.get(d.id).count
+        : null,
+      printActivity: getPrintActivity(d.id, d.voidCount !== null),
+    }));
+
+    const online  = enriched.filter((d) => d.connectionStatus === 1).length;
+    const offline = enriched.filter((d) => d.connectionStatus !== 1).length;
+    const alerts  = enriched.filter((d) => d.hasAlert).length;
+
+    connectCache = {
+      payload: {
+        summary: { total: enriched.length, online, offline, alerts },
+        devices: enriched,
+        lastUpdated: new Date().toISOString(),
+      },
+      fetchedAt: Date.now(),
+    };
+    return connectCache.payload;
+  })().finally(() => { connectInFlight = null; });
+  return connectInFlight;
+}
+
+setInterval(() => {
+  refreshConnectDevices().catch((err) => console.error('[connect-poll]', err.message));
+}, CONNECT_POLL_MS);
+refreshConnectDevices().catch((err) => console.error('[connect-poll] initial fetch:', err.message));
 
 // ─── MobiControl ──────────────────────────────────────────────────────────────
 
@@ -864,29 +991,16 @@ app.get('/api/config', (req, res) => {
 
 app.get('/api/devices', async (req, res) => {
   try {
-    const rawDevices = await fetchDevices();
-    const processed  = rawDevices.map(processDevice);
-    const sorted     = sortDevices(processed);
-
-    // Detect calibrations before enriching with counts
-    checkCalibrations(sorted);
-
-    const enriched = sorted.map((d) => ({
-      ...d,
-      calibrationCount: d.voidCount !== null
-        ? stmt.getCalibrationCount.get(d.id).count
-        : null,
-    }));
-
-    const online  = enriched.filter((d) => d.connectionStatus === 1).length;
-    const offline = enriched.filter((d) => d.connectionStatus !== 1).length;
-    const alerts  = enriched.filter((d) => d.hasAlert).length;
-
-    res.json({
-      summary: { total: enriched.length, online, offline, alerts },
-      devices: enriched,
-      lastUpdated: new Date().toISOString(),
-    });
+    if (Date.now() - connectCache.fetchedAt > CONNECT_CACHE_MAX_MS) {
+      try {
+        await refreshConnectDevices();
+      } catch (err) {
+        // SOTI unreachable: serve the previous snapshot if we have one.
+        if (!connectCache.payload) throw err;
+        console.error('[/api/devices] refresh failed, serving cached data:', err.message);
+      }
+    }
+    res.json(connectCache.payload);
   } catch (err) {
     console.error('[/api/devices]', err.message);
     res.status(500).json({ error: err.message });
