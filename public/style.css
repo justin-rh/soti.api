@@ -8,6 +8,10 @@
   padding: 0;
 }
 
+/* Generic visibility utility — low specificity on purpose so any element-specific
+   .hidden combo rule below can still override it, but nothing needs one just to work. */
+.hidden { display: none; }
+
 :root {
   --color-bg:       #0d0f12;
   --color-surface:  #151820;
@@ -191,6 +195,8 @@ body {
   gap: 16px;
 }
 
+.summary-grid.hidden { display: none; }
+
 .summary-grid--5 { grid-template-columns: repeat(5, 1fr); }
 .summary-grid--6 { grid-template-columns: repeat(6, 1fr); }
 
@@ -345,7 +351,8 @@ body {
   background: var(--color-surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow-sm);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .printer-table {
@@ -372,29 +379,34 @@ body {
 }
 
 .printer-table th[data-sort],
-.printer-table th[data-sort-mc] {
+.printer-table th[data-sort-mc],
+.printer-table th[data-sort-mcapp] {
   cursor: pointer;
 }
 
 .printer-table th[data-sort]:hover,
-.printer-table th[data-sort-mc]:hover {
+.printer-table th[data-sort-mc]:hover,
+.printer-table th[data-sort-mcapp]:hover {
   color: var(--color-text);
 }
 
 .printer-table th[data-sort]:hover .sort-icon,
-.printer-table th[data-sort-mc]:hover .sort-icon {
+.printer-table th[data-sort-mc]:hover .sort-icon,
+.printer-table th[data-sort-mcapp]:hover .sort-icon {
   color: var(--color-primary);
 }
 
 .sort-icon {
-  font-size: 0.7rem;
-  margin-left: 2px;
-  color: var(--color-text-light);
+  font-size: 1rem;
+  font-weight: bold;
+  margin-left: 5px;
+  color: var(--color-text-muted);
+  display: inline-block;
 }
 
 th.sort-asc .sort-icon, th.sort-desc .sort-icon {
   color: var(--color-primary);
-  font-size: 0;
+  font-size: 1.1rem;
 }
 
 .printer-table td {
@@ -411,6 +423,181 @@ th.sort-asc .sort-icon, th.sort-desc .sort-icon {
 .printer-table tbody tr.row-offline { background-color: var(--color-row-offline); }
 .printer-table tbody tr.row-alert   { background-color: var(--color-row-alert); }
 .printer-table tbody tr.row-offline.row-alert { background-color: var(--color-row-offline); }
+
+.printer-table tbody tr.row-clickable { cursor: pointer; }
+
+.mcapp-detail-row td, .mc-detail-row td { background: var(--color-bg); padding: 0; }
+
+.detail-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px 20px;
+  margin-bottom: 4px;
+}
+
+.detail-stat { display: flex; flex-direction: column; gap: 2px; }
+.detail-stat-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--color-text-muted); }
+.detail-stat-value { font-size: 0.875rem; color: var(--color-text); }
+
+.detail-profile {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+}
+.detail-profile--bad { border-color: #c0392b; background: rgba(192, 57, 43, 0.06); }
+.detail-profile-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.profile-status-bad { color: #c0392b; font-weight: 600; }
+
+.compare-row--diff td { background: rgba(192, 57, 43, 0.08); }
+.compare-col-header { font-weight: 600; }
+
+.mcapp-detail {
+  padding: 16px 20px;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.mcapp-detail h4 {
+  margin: 14px 0 6px;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+.mcapp-detail h4:first-of-type { margin-top: 0; }
+
+.mcapp-perm-list { margin: 0; padding-left: 18px; }
+.mcapp-perm-list li { margin-bottom: 4px; color: var(--color-text); }
+
+.mcapp-schema {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  max-height: 280px;
+  overflow: auto;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.8rem;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mcapp-schema .json-key     { color: #7dd3fc; }
+.mcapp-schema .json-string  { color: #a5d6a7; }
+.mcapp-schema .json-number  { color: #f59e0b; }
+.mcapp-schema .json-boolean { color: #c792ea; }
+.mcapp-schema .json-null    { color: #64748b; }
+
+.mcapp-group-block {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.mcapp-group-path {
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 6px;
+}
+
+.mcapp-applied-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--color-text-light);
+  font-size: 0.8rem;
+}
+
+.mcapp-log-btn {
+  margin-left: 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface2);
+  color: var(--color-primary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.mcapp-log-btn:hover { background: var(--color-bg); }
+
+/* App Logs modal */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-backdrop.hidden { display: none; }
+
+.modal-panel {
+  background: var(--color-surface);
+  border: 1px solid #3d4454;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  width: min(900px, 92vw);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-panel--wide { width: min(1200px, 95vw); }
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.modal-header h3 { margin: 0; font-size: 1rem; color: var(--color-text); }
+
+.modal-close {
+  border: none;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.modal-close:hover { color: var(--color-text); background: var(--color-surface2); }
+
+.modal-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+}
+
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.modal-field input, .modal-field select {
+  background: var(--color-surface2);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  padding: 6px 8px;
+  font-size: 0.8125rem;
+}
 
 .table-placeholder td {
   text-align: center;
@@ -657,6 +844,136 @@ th.sort-asc .sort-icon, th.sort-desc .sort-icon {
   border-bottom-color: var(--color-primary);
 }
 
+/* Grouped tab (e.g. MobiControl → Devices / Advanced Settings) */
+
+.tab-group { position: relative; display: flex; }
+
+.tab-chevron { transition: transform 0.15s; }
+.tab-btn--group[aria-expanded="true"] .tab-chevron { transform: rotate(180deg); }
+
+.tab-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  min-width: 200px;
+  background: var(--color-surface2);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 100;
+}
+
+.tab-dropdown.hidden { display: none; }
+
+.tab-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tab-dropdown-item:hover { background: var(--color-bg); color: var(--color-text); }
+
+.tab-dropdown-item--active { color: var(--color-primary); }
+
+.tab-dropdown-item-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  opacity: 0;
+  flex-shrink: 0;
+}
+
+.tab-dropdown-item--active .tab-dropdown-item-dot { opacity: 1; }
+
+.tab-dropdown-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: 4px 2px;
+}
+
+.tab-dropdown-checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 0.8125rem;
+  color: var(--color-text);
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.tab-dropdown-checkbox-item:hover { background: var(--color-bg); }
+
+.tab-dropdown-checkbox-item input { cursor: pointer; }
+
+.tab-dropdown-view-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tab-dropdown-view-row .tab-dropdown-item { flex: 1; }
+
+.tab-dropdown-view-delete {
+  border: none;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
+.tab-dropdown-view-delete:hover { color: var(--color-offline); background: var(--color-bg); }
+
+.tab-dropdown-empty {
+  padding: 8px 10px;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+/* Apps tab column show/hide — exclude the detail row (single <td colspan>), which
+   would otherwise have its only cell hidden by the nth-child(1) rule */
+#mcapps-table.hide-col-1 th:nth-child(1), #mcapps-table.hide-col-1 tbody tr:not(.mcapp-detail-row) td:nth-child(1) { display: none; }
+#mcapps-table.hide-col-2 th:nth-child(2), #mcapps-table.hide-col-2 tbody tr:not(.mcapp-detail-row) td:nth-child(2) { display: none; }
+#mcapps-table.hide-col-3 th:nth-child(3), #mcapps-table.hide-col-3 tbody tr:not(.mcapp-detail-row) td:nth-child(3) { display: none; }
+#mcapps-table.hide-col-4 th:nth-child(4), #mcapps-table.hide-col-4 tbody tr:not(.mcapp-detail-row) td:nth-child(4) { display: none; }
+#mcapps-table.hide-col-5 th:nth-child(5), #mcapps-table.hide-col-5 tbody tr:not(.mcapp-detail-row) td:nth-child(5) { display: none; }
+#mcapps-table.hide-col-6 th:nth-child(6), #mcapps-table.hide-col-6 tbody tr:not(.mcapp-detail-row) td:nth-child(6) { display: none; }
+#mcapps-table.hide-col-7 th:nth-child(7), #mcapps-table.hide-col-7 tbody tr:not(.mcapp-detail-row) td:nth-child(7) { display: none; }
+#mcapps-table.hide-col-8 th:nth-child(8), #mcapps-table.hide-col-8 tbody tr:not(.mcapp-detail-row) td:nth-child(8) { display: none; }
+#mcapps-table.hide-col-9 th:nth-child(9), #mcapps-table.hide-col-9 tbody tr:not(.mcapp-detail-row) td:nth-child(9) { display: none; }
+
+.mcapp-icon, .mcapp-icon-placeholder {
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  display: inline-block;
+  vertical-align: middle;
+  object-fit: contain;
+}
+
+.mcapp-icon-placeholder { background: var(--color-surface2); border: 1px solid var(--color-border); }
+
+.col-mcapp-icon { width: 40px; }
+
 /* =========================================================
    Tab Content
    ========================================================= */
@@ -668,6 +985,7 @@ th.sort-asc .sort-icon, th.sort-desc .sort-icon {
    MobiControl Table Columns
    ========================================================= */
 
+.col-mc-compare    { width: 32px; }
 .col-mc-name       { min-width: 160px; }
 .col-mc-platform   { width: 120px; }
 .col-mc-model      { min-width: 140px; }
