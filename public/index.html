@@ -56,14 +56,46 @@
       </svg>
       SOTI Connect
     </button>
-    <button class="tab-btn" data-tab="mobicontrol" role="tab"
-            aria-selected="false" aria-controls="tab-mobicontrol">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        <rect x="4" y="1" width="8" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/>
-        <circle cx="8" cy="12.5" r="1" fill="currentColor"/>
-      </svg>
-      MobiControl
-    </button>
+    <div class="tab-group" id="mobicontrol-tab-group">
+      <button class="tab-btn tab-btn--group" id="mobicontrol-group-btn" type="button"
+              aria-haspopup="true" aria-expanded="false" aria-controls="mobicontrol-dropdown">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <rect x="4" y="1" width="8" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="12.5" r="1" fill="currentColor"/>
+        </svg>
+        MobiControl
+        <svg class="tab-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+          <path d="M2 3.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <div class="tab-dropdown hidden" id="mobicontrol-dropdown" role="menu" aria-label="MobiControl sections">
+        <button class="tab-dropdown-item" data-tab="mobicontrol" role="menuitem menuitemradio"
+                aria-controls="tab-mobicontrol">
+          <span class="tab-dropdown-item-dot"></span>
+          Devices
+        </button>
+        <button class="tab-dropdown-item" data-tab="advsettings" role="menuitem menuitemradio"
+                aria-controls="tab-advsettings">
+          <span class="tab-dropdown-item-dot"></span>
+          Advanced Settings
+        </button>
+        <button class="tab-dropdown-item" data-tab="mcapps" role="menuitem menuitemradio"
+                aria-controls="tab-mcapps">
+          <span class="tab-dropdown-item-dot"></span>
+          Apps
+        </button>
+        <button class="tab-dropdown-item" data-tab="apppolicies" role="menuitem menuitemradio"
+                aria-controls="tab-apppolicies">
+          <span class="tab-dropdown-item-dot"></span>
+          App Policies
+        </button>
+        <button class="tab-dropdown-item" data-tab="profiles" role="menuitem menuitemradio"
+                aria-controls="tab-profiles">
+          <span class="tab-dropdown-item-dot"></span>
+          Profiles
+        </button>
+      </div>
+    </div>
     <button class="tab-btn" data-tab="ping" role="tab"
             aria-selected="false" aria-controls="tab-ping">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -225,12 +257,14 @@
           <option value="">All Groups</option>
         </select>
         <button id="mc-clear-filters" class="btn-clear" title="Clear all filters">Clear</button>
+        <button id="mc-compare-btn" class="btn btn--sm" disabled title="Select 2 devices to compare">Compare (0/2)</button>
       </section>
 
       <section class="table-wrap" aria-label="Device list">
         <table class="printer-table" id="mc-table">
           <thead>
             <tr>
+              <th class="col-mc-compare"></th>
               <th class="col-mc-name"       data-sort-mc="name">Name <span class="sort-icon">↕</span></th>
               <th class="col-mc-platform"   data-sort-mc="platform">Platform <span class="sort-icon">↕</span></th>
               <th class="col-mc-model"      data-sort-mc="model">Model <span class="sort-icon">↕</span></th>
@@ -245,7 +279,7 @@
           </thead>
           <tbody id="mc-table-body">
             <tr class="table-placeholder">
-              <td colspan="9">Loading device data&hellip;</td>
+              <td colspan="11">Loading device data&hellip;</td>
             </tr>
           </tbody>
         </table>
@@ -253,6 +287,292 @@
         <div class="table-footer">
           <span id="mc-row-count" class="row-count"></span>
         </div>
+      </section>
+
+    </div>
+
+    <!-- ═══ GROUP ADVANCED SETTINGS TAB ════════════════════════════════════════ -->
+    <div id="tab-advsettings" class="tab-content" role="tabpanel">
+
+      <section class="summary-grid" aria-label="Advanced settings summary">
+        <div class="card card--total">
+          <div class="card-label">Settings</div>
+          <div id="stat-adv-total" class="card-value">—</div>
+        </div>
+        <div class="card card--online">
+          <div class="card-label">Inherited</div>
+          <div id="stat-adv-inherited" class="card-value">—</div>
+        </div>
+        <div class="card card--warn">
+          <div class="card-label">Overridden</div>
+          <div id="stat-adv-overridden" class="card-value">—</div>
+        </div>
+      </section>
+
+      <section class="filter-bar" aria-label="Advanced settings filters">
+        <select id="mc-adv-group-select" class="filter-select" style="flex: 1; min-width: 0;" aria-label="Select device group">
+          <option value="">Select a group…</option>
+        </select>
+        <div class="filter-search-wrap">
+          <svg class="filter-search-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="6.5" cy="6.5" r="5" stroke="#94a3b8" stroke-width="1.5"/>
+            <path d="M10.5 10.5l3 3" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="mc-adv-search" class="filter-input"
+                 placeholder="Search setting name, family…" aria-label="Search settings" />
+        </div>
+      </section>
+
+      <section class="table-wrap" aria-label="Group Advanced Settings">
+        <table class="printer-table" id="mc-adv-config-table">
+          <thead>
+            <tr>
+              <th>Target Family</th>
+              <th>Setting Name</th>
+              <th>Inherited</th>
+              <th>Inherits From</th>
+              <th>Last Update</th>
+              <th>Configured By</th>
+            </tr>
+          </thead>
+          <tbody id="mc-adv-config-body">
+            <tr class="table-placeholder">
+              <td colspan="6">Select a group above</td>
+            </tr>
+          </tbody>
+        </table>
+        <div id="mc-adv-no-results" class="no-results hidden">No settings match your search.</div>
+        <div id="mc-adv-config-error" class="no-results hidden"></div>
+      </section>
+    </div>
+
+    <!-- ═══ MOBICONTROL APPS TAB ═══════════════════════════════════════════════ -->
+    <div id="tab-mcapps" class="tab-content" role="tabpanel">
+
+      <div id="mcapps-error-banner" class="error-banner hidden">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="7" stroke="#c0392b" stroke-width="1.5"/>
+          <path d="M8 4v5M8 11v1" stroke="#c0392b" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span id="mcapps-error-message">Failed to load data.</span>
+      </div>
+
+      <section class="summary-grid" aria-label="Enterprise apps summary">
+        <div class="card card--total">
+          <div class="card-label">Total Apps</div>
+          <div id="stat-mcapps-total" class="card-value">—</div>
+        </div>
+        <div class="card card--api">
+          <div class="card-label">With Config Schema</div>
+          <div id="stat-mcapps-configurable" class="card-value">—</div>
+        </div>
+        <div class="card card--android">
+          <div class="card-label">Android Apps</div>
+          <div id="stat-mcapps-android" class="card-value">—</div>
+        </div>
+        <div class="card card--ios">
+          <div class="card-label">iOS Apps</div>
+          <div id="stat-mcapps-ios" class="card-value">—</div>
+        </div>
+        <div class="card card--macos">
+          <div class="card-label">macOS Apps</div>
+          <div id="stat-mcapps-macos" class="card-value">—</div>
+        </div>
+      </section>
+
+      <section class="filter-bar" aria-label="App filters">
+        <div class="filter-search-wrap">
+          <svg class="filter-search-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="6.5" cy="6.5" r="5" stroke="#94a3b8" stroke-width="1.5"/>
+            <path d="M10.5 10.5l3 3" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <input type="search" id="mcapps-search" class="filter-input"
+                 placeholder="Search name, package ID, author…" aria-label="Search apps" />
+        </div>
+        <select id="mcapps-source-filter" class="filter-select" aria-label="Filter by app source">
+          <option value="">All Sources</option>
+          <option value="Enterprise">Enterprise</option>
+          <option value="GooglePlayStore">Google Play</option>
+          <option value="AppleAppStore">App Store</option>
+        </select>
+        <div class="tab-group" id="mcapps-columns-group">
+          <button type="button" id="mcapps-columns-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+            Columns <span class="tab-chevron">▾</span>
+          </button>
+          <div id="mcapps-columns-dropdown" class="tab-dropdown hidden" role="menu">
+            <!-- populated by app.js -->
+          </div>
+        </div>
+        <div class="tab-group" id="mcapps-views-group">
+          <button type="button" id="mcapps-views-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+            Views <span class="tab-chevron">▾</span>
+          </button>
+          <div id="mcapps-views-dropdown" class="tab-dropdown hidden" role="menu">
+            <div id="mcapps-views-list"><!-- populated by app.js --></div>
+            <div class="tab-dropdown-divider"></div>
+            <button type="button" id="mcapps-save-view-btn" class="tab-dropdown-item">+ Save current view&hellip;</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="table-wrap" aria-label="Enterprise apps list">
+        <table class="printer-table" id="mcapps-table">
+          <thead>
+            <tr>
+              <th class="col-mcapp-icon"></th>
+              <th class="col-mcapp-name"     data-sort-mcapp="AppName">App Name <span class="sort-icon">↕</span></th>
+              <th class="col-mcapp-platform" data-sort-mcapp="platform">Platform <span class="sort-icon">↕</span></th>
+              <th class="col-mcapp-version"  data-sort-mcapp="AppVersion">Version <span class="sort-icon">↕</span></th>
+              <th class="col-mcapp-author"   data-sort-mcapp="AppAuthor">Author <span class="sort-icon">↕</span></th>
+              <th class="col-mcapp-pkg"      data-sort-mcapp="AppPackageId">Package ID <span class="sort-icon">↕</span></th>
+              <th class="col-mcapp-origin"   data-sort-mcapp="AppOriginType">Origin <span class="sort-icon">↕</span></th>
+              <th class="col-mcapp-perms"    data-sort-mcapp="_permsCount">Permissions <span class="sort-icon">↕</span></th>
+              <th class="col-mcapp-status"   data-sort-mcapp="_active">Status <span class="sort-icon">↕</span></th>
+            </tr>
+          </thead>
+          <tbody id="mcapps-table-body">
+            <tr class="table-placeholder">
+              <td colspan="9">Loading apps&hellip;</td>
+            </tr>
+          </tbody>
+        </table>
+        <div id="mcapps-no-results" class="no-results hidden">No apps match your search.</div>
+      </section>
+    </div>
+
+    <!-- ═══ MOBICONTROL PROFILES TAB ═══════════════════════════════════════════ -->
+    <div id="tab-profiles" class="tab-content" role="tabpanel">
+      <div id="profiles-error-banner" class="error-banner hidden">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="7" stroke="#c0392b" stroke-width="1.5"/>
+          <path d="M8 4v5M8 11v1" stroke="#c0392b" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span id="profiles-error-message">Failed to load data.</span>
+      </div>
+
+      <section id="profiles-summary-grid" class="summary-grid" aria-label="Profiles summary">
+        <div class="card card--total">
+          <div class="card-label">Total Profiles</div>
+          <div id="stat-profiles-total" class="card-value">—</div>
+        </div>
+        <div class="card card--online">
+          <div class="card-label">Assigned</div>
+          <div id="stat-profiles-assigned" class="card-value">—</div>
+        </div>
+        <div class="card card--offline">
+          <div class="card-label">Disabled / Draft</div>
+          <div id="stat-profiles-disabled" class="card-value">—</div>
+        </div>
+        <div class="card card--noncompliant">
+          <div class="card-label">Needs Attention</div>
+          <div id="stat-profiles-attention" class="card-value">—</div>
+        </div>
+        <div id="profiles-family-cards" style="display:contents;"><!-- populated by app.js --></div>
+      </section>
+
+      <section id="profiles-list-section" aria-label="All profiles">
+        <div class="filter-bar" aria-label="Profile filters">
+          <div class="filter-search-wrap">
+            <svg class="filter-search-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="6.5" cy="6.5" r="5" stroke="#94a3b8" stroke-width="1.5"/>
+              <path d="M10.5 10.5l3 3" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <input type="search" id="profiles-list-search" class="filter-input"
+                   placeholder="Search profile name…" aria-label="Search profiles" />
+          </div>
+          <select id="profiles-list-family-filter" class="filter-select" aria-label="Filter by device family">
+            <option value="">All Families</option>
+          </select>
+          <button id="profiles-list-refresh" class="btn btn--sm">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table class="printer-table" id="profiles-list-table">
+            <thead>
+              <tr>
+                <th data-sort-profiles="Name">Name <span class="sort-icon">↕</span></th>
+                <th data-sort-profiles="DeviceFamily">Family <span class="sort-icon">↕</span></th>
+                <th data-sort-profiles="Status">Status <span class="sort-icon">↕</span></th>
+                <th data-sort-profiles="ActiveVersionNumber">Version <span class="sort-icon">↕</span></th>
+                <th data-sort-profiles="LastModified">Last Modified <span class="sort-icon">↕</span></th>
+              </tr>
+            </thead>
+            <tbody id="profiles-list-table-body">
+              <tr class="table-placeholder"><td colspan="5">Loading profiles&hellip;</td></tr>
+            </tbody>
+          </table>
+          <div id="profiles-list-no-results" class="no-results hidden">No profiles match your search.</div>
+        </div>
+      </section>
+
+      <section id="profiles-detail" class="table-wrap hidden" aria-label="Profile detail">
+        <button id="profiles-back-btn" class="btn-clear" style="margin:12px 0 0 12px;">&larr; Back to all profiles</button>
+        <div id="profiles-detail-content"></div>
+      </section>
+    </div>
+
+    <!-- ═══ APP POLICIES TAB ════════════════════════════════════════════════ -->
+    <div id="tab-apppolicies" class="tab-content" role="tabpanel">
+      <div id="apppolicies-error-banner" class="error-banner hidden">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="7" stroke="#c0392b" stroke-width="1.5"/>
+          <path d="M8 4v5M8 11v1" stroke="#c0392b" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span id="apppolicies-error-message">Failed to load data.</span>
+      </div>
+
+      <section id="apppolicies-summary-grid" class="summary-grid" aria-label="App policies summary">
+        <div class="card card--total">
+          <div class="card-label">Total Policies</div>
+          <div id="stat-apppolicies-total" class="card-value">—</div>
+        </div>
+        <div class="card card--online">
+          <div class="card-label">Assigned</div>
+          <div id="stat-apppolicies-assigned" class="card-value">—</div>
+        </div>
+        <div class="card card--offline">
+          <div class="card-label">Disabled / Draft</div>
+          <div id="stat-apppolicies-disabled" class="card-value">—</div>
+        </div>
+        <div id="apppolicies-family-cards" style="display:contents;"><!-- populated by app.js --></div>
+      </section>
+
+      <section id="apppolicies-list-section" aria-label="All app policies">
+        <div class="filter-bar" aria-label="App policy filters">
+          <div class="filter-search-wrap">
+            <svg class="filter-search-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="6.5" cy="6.5" r="5" stroke="#94a3b8" stroke-width="1.5"/>
+              <path d="M10.5 10.5l3 3" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <input type="search" id="apppolicies-list-search" class="filter-input"
+                   placeholder="Search policy name…" aria-label="Search app policies" />
+          </div>
+          <select id="apppolicies-list-family-filter" class="filter-select" aria-label="Filter by family">
+            <option value="">All Families</option>
+          </select>
+          <button id="apppolicies-list-refresh" class="btn btn--sm">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table class="printer-table" id="apppolicies-list-table">
+            <thead>
+              <tr>
+                <th data-sort-apppolicies="Name">Name <span class="sort-icon">↕</span></th>
+                <th data-sort-apppolicies="Family">Family <span class="sort-icon">↕</span></th>
+                <th data-sort-apppolicies="Apps">Apps <span class="sort-icon">↕</span></th>
+                <th data-sort-apppolicies="Status">Status <span class="sort-icon">↕</span></th>
+                <th data-sort-apppolicies="LastModified">Last Modified <span class="sort-icon">↕</span></th>
+              </tr>
+            </thead>
+            <tbody id="apppolicies-list-table-body">
+              <tr class="table-placeholder"><td colspan="5">Loading app policies&hellip;</td></tr>
+            </tbody>
+          </table>
+          <div id="apppolicies-list-no-results" class="no-results hidden">No app policies match your search.</div>
+        </div>
+      </section>
+
+      <section id="apppolicies-detail" class="table-wrap hidden" aria-label="App policy detail">
+        <button id="apppolicies-back-btn" class="btn-clear" style="margin:12px 0 0 12px;">&larr; Back to all app policies</button>
+        <div id="apppolicies-detail-content"></div>
       </section>
     </div>
 
@@ -436,6 +756,105 @@
   </main>
 
   <div id="ping-toast"></div>
+
+  <div id="mcapp-logs-modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-label="Application logs">
+      <div class="modal-header">
+        <h3 id="mcapp-logs-modal-title">Application Logs</h3>
+        <button type="button" id="mcapp-logs-modal-close" class="modal-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="filter-bar" style="box-shadow:none;padding:0 0 12px 0;">
+          <label class="modal-field">
+            Start <input type="datetime-local" id="mcapp-logs-start" />
+          </label>
+          <label class="modal-field">
+            End <input type="datetime-local" id="mcapp-logs-end" />
+          </label>
+          <label class="modal-field">
+            Severity
+            <select id="mcapp-logs-severity" class="filter-select">
+              <option value="">All Severities</option>
+              <option value="Unspecified">Unspecified</option>
+              <option value="Info">Info</option>
+              <option value="Error">Error</option>
+            </select>
+          </label>
+          <button type="button" id="mcapp-logs-fetch" class="btn btn--sm">Load Logs</button>
+        </div>
+        <div id="mcapp-logs-error" class="no-results hidden" style="padding:16px;"></div>
+        <div id="mcapp-logs-body">
+          <div class="cell-na" style="padding:16px 0;">Pick a date range and click Load Logs.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="policy-logs-modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal-panel modal-panel--wide" role="dialog" aria-modal="true" aria-label="Full policy log">
+      <div class="modal-header">
+        <h3 id="policy-logs-modal-title">Policy Log</h3>
+        <button type="button" id="policy-logs-modal-close" class="modal-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="cell-na" style="margin-top:0;">Every logged event for this policy, across all devices — not scoped to one device.</p>
+        <div class="filter-bar" style="box-shadow:none;padding:0 0 12px 0;">
+          <label class="modal-field">
+            Start <input type="datetime-local" id="policy-logs-start" />
+          </label>
+          <label class="modal-field">
+            End <input type="datetime-local" id="policy-logs-end" />
+          </label>
+          <label class="modal-field">
+            Severity
+            <select id="policy-logs-severity" class="filter-select">
+              <option value="">All Severities</option>
+              <option value="Information">Information</option>
+              <option value="Warning">Warning</option>
+              <option value="Error">Error</option>
+            </select>
+          </label>
+          <button type="button" id="policy-logs-fetch" class="btn btn--sm">Load Logs</button>
+        </div>
+        <div id="policy-logs-error" class="no-results hidden" style="padding:16px;"></div>
+        <div id="policy-logs-body">
+          <div class="cell-na" style="padding:16px 0;">Pick a date range and click Load Logs.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="device-compare-modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal-panel modal-panel--wide" role="dialog" aria-modal="true" aria-label="Compare device profiles">
+      <div class="modal-header">
+        <h3 id="device-compare-modal-title">Compare Devices</h3>
+        <button type="button" id="device-compare-modal-close" class="modal-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="device-compare-error" class="no-results hidden" style="padding:16px;"></div>
+        <div id="device-compare-body">
+          <div class="cell-na" style="padding:16px 0;">Loading&hellip;</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="config-viewer-modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal-panel modal-panel--wide" role="dialog" aria-modal="true" aria-label="Configuration detail">
+      <div class="modal-header">
+        <h3 id="config-viewer-modal-title">Configuration</h3>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button type="button" id="config-viewer-copy" class="btn btn--sm">Copy JSON</button>
+          <button type="button" id="config-viewer-download" class="btn btn--sm">Export JSON</button>
+          <button type="button" id="config-viewer-modal-close" class="modal-close" aria-label="Close">✕</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <pre id="config-viewer-body" class="mcapp-schema" style="max-height:70vh;"></pre>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

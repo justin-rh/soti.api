@@ -50,6 +50,13 @@ db.exec(`
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS saved_views (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope      TEXT    NOT NULL,
+    name       TEXT    NOT NULL,
+    config     TEXT    NOT NULL,
+    created_at TEXT    NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS label_activity_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     device_id   INTEGER NOT NULL,
@@ -60,6 +67,7 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_cal_device ON calibration_events(device_id);
   CREATE INDEX IF NOT EXISTS idx_cal_time   ON calibration_events(triggered_at);
+  CREATE INDEX IF NOT EXISTS idx_saved_views_scope ON saved_views(scope);
   CREATE INDEX IF NOT EXISTS idx_activity_device_time ON label_activity_events(device_id, recorded_at);
 `);
 
@@ -1043,6 +1051,190 @@ app.post('/api/devices/:id/action', async (req, res) => {
   }
 });
 
+// Full per-device detail (memory/storage, battery, antivirus, enrollment/security
+// state, Exchange status, etc.) plus custom attributes — much richer than the
+// bulk /devices list, fetched lazily only when a device row is expanded.
+app.get('/api/mc/devices/:id/detail', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const [detailRes, attrsRes] = await Promise.all([
+      fetch(`${MC_BASE_URL}/MobiControl/api/devices/${encodeURIComponent(req.params.id)}`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }),
+      fetch(`${MC_BASE_URL}/MobiControl/api/devices/${encodeURIComponent(req.params.id)}/customattributes`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }),
+    ]);
+    if (!detailRes.ok) {
+      const text = await detailRes.text();
+      return res.status(detailRes.status).json({ error: `MC device detail fetch failed (${detailRes.status}): ${text}` });
+    }
+    const detail = await detailRes.json();
+    const customAttributes = attrsRes.ok ? await attrsRes.json() : [];
+    res.json({ detail, customAttributes, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/devices/:id/detail]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk profile list — powers the "browse all profiles" view. This is the true
+// system-wide catalog (unlike /profiles/digests, which only returns profiles
+// whose assignment applies to a specific device group path).
+app.get('/api/mc/profiles', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const all = [];
+    const take = 200;
+    let skip = 0;
+    while (true) {
+      const r = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/profiles?skip=${skip}&take=${take}`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`MC profiles list fetch failed (${r.status}): ${text}`);
+      }
+      const raw  = await r.json();
+      const page = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+      all.push(...page);
+      if (page.length < take) break;
+      skip += take;
+    }
+    all.sort((a, b) => (a.Name || '').localeCompare(b.Name || ''));
+    res.json({ profiles: all, total: all.length, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/profiles]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Per-device profile install status — the key diagnostic signal for telling apart
+// "MobiControl pushed a bad config" (a payload/package shows a failed Status) vs
+// a hardware/manufacturer issue (everything shows Installed/fine).
+app.get('/api/mc/devices/:id/profiles', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const r = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/devices/${encodeURIComponent(req.params.id)}/profiles`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!r.ok) {
+      const text = await r.text();
+      return res.status(r.status).json({ error: `MC device profiles fetch failed (${r.status}): ${text}` });
+    }
+    const profiles = await r.json();
+    res.json({ profiles, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/devices/:id/profiles]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Profile payloads (its actual configurations, e.g. Wi-Fi, VPN, restrictions) —
+// what the profile *does*, independent of any specific device's install status.
+app.get('/api/mc/profiles/:id/payloads', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const r = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/profiles/${encodeURIComponent(req.params.id)}/payloads`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!r.ok) {
+      const text = await r.text();
+      return res.status(r.status).json({ error: `MC profile payloads fetch failed (${r.status}): ${text}` });
+    }
+    const payloadInfo = await r.json();
+    res.json({ payloadInfo, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/profiles/:id/payloads]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Full profile detail — used when drilling in from a device's profile list to see
+// what a profile actually is (not just its per-device install status).
+app.get('/api/mc/profiles/:id', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const r = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/profiles/${encodeURIComponent(req.params.id)}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!r.ok) {
+      const text = await r.text();
+      return res.status(r.status).json({ error: `MC profile fetch failed (${r.status}): ${text}` });
+    }
+    const profile = await r.json();
+    res.json({ profile, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/profiles/:id]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/mc/profiles/:id/versions', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const r = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/profiles/${encodeURIComponent(req.params.id)}/versions`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!r.ok) {
+      const text = await r.text();
+      return res.status(r.status).json({ error: `MC profile versions fetch failed (${r.status}): ${text}` });
+    }
+    const versions = await r.json();
+    res.json({ versions, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/profiles/:id/versions]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Profile event logs — the key diagnostic trail for a failed config push (Error
+// severity entries here point directly at what MobiControl did to the device).
+app.get('/api/mc/profiles/:id/logs', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const r = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/profiles/${encodeURIComponent(req.params.id)}/logs?Take=100`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!r.ok) {
+      const text = await r.text();
+      return res.status(r.status).json({ error: `MC profile logs fetch failed (${r.status}): ${text}` });
+    }
+    const raw  = await r.json();
+    const logs = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+    logs.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
+    res.json({ logs, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/profiles/:id/logs]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/mc/devices', async (req, res) => {
   if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
     return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
@@ -1066,6 +1258,1058 @@ app.get('/api/mc/devices', async (req, res) => {
     console.error('[/api/mc/devices]', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+app.get('/api/mc/devicegroups/advanced-config', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const groupPath = req.query.path;
+  if (!groupPath) return res.status(400).json({ error: 'path query param required' });
+
+  try {
+    const token = await getMcToken();
+    // SOTI docs: path must be double URL-encoded for direct API calls (Swagger UI encodes once itself).
+    const encodedPath = encodeURIComponent(encodeURIComponent(groupPath));
+    const mcRes = await fetch(`${MC_BASE_URL}/MobiControl/api/devicegroups/${encodedPath}/advancedSettings`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' },
+    });
+    const text = await mcRes.text();
+    if (!mcRes.ok) return res.status(mcRes.status).json({ error: text });
+    res.json(text ? JSON.parse(text) : null);
+  } catch (err) {
+    console.error('[/api/mc/devicegroups/advanced-config]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// MobiControl's bulk enterprise apps endpoint returns one row per uploaded
+// version of an app, not deduped — e.g. an app with 7 historical uploads shows
+// up 7 times, each with a different ReferenceId. Only the highest version's
+// ReferenceId typically has an active policy attached, so clicking an old
+// version's row causes "invalid reference" errors on applied-to/logs lookups.
+// Dedup by AppPackageId, keeping the highest version, to match how Google Play
+// apps are already deduped.
+function compareVersions(a, b) {
+  const pa = String(a || '0').split('.').map(Number);
+  const pb = String(b || '0').split('.').map(Number);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+async function fetchAllMcEnterpriseApps() {
+  const token = await getMcToken();
+  const all = [];
+  const take = 200;
+  let skip = 0;
+
+  while (true) {
+    const res = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/android/apps/enterprise?skip=${skip}&take=${take}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`MC enterprise apps fetch failed (${res.status}): ${text}`);
+    }
+    const raw  = await res.json();
+    const page = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+    all.push(...page);
+    if (page.length < take) break;
+    skip += take;
+  }
+
+  const byPackageId = new Map();
+  for (const app of all) {
+    if (!app.AppPackageId) continue;
+    const existing = byPackageId.get(app.AppPackageId);
+    if (!existing || compareVersions(app.AppVersion, existing.AppVersion) > 0) {
+      byPackageId.set(app.AppPackageId, app);
+    }
+  }
+  return [...byPackageId.values()];
+}
+
+app.get('/api/mc/apps/enterprise', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const apps = await fetchAllMcEnterpriseApps();
+    apps.sort((a, b) => (a.AppName || '').localeCompare(b.AppName || ''));
+    res.json({ apps, total: apps.length, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/enterprise]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function fetchAllMcIosEnterpriseApps() {
+  const token = await getMcToken();
+  const res = await fetch(
+    `${MC_BASE_URL}/MobiControl/api/appManagement/apple/iOS/apps/enterprise`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`MC iOS enterprise apps fetch failed (${res.status}): ${text}`);
+  }
+  const raw = await res.json();
+  const apps = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+  // Normalize iOS field names (Name/ApplicationIdOrUrl/IconUrl/ApplicationOrigin)
+  // to match the Android enterprise app shape (AppName/AppPackageId/AppIconUrl/
+  // AppOriginType) so downstream sorting/rendering doesn't need to special-case platform.
+  return apps.map(a => ({
+    ...a,
+    AppName: a.Name,
+    AppPackageId: a.ApplicationIdOrUrl,
+    AppIconUrl: a.IconUrl,
+    AppOriginType: a.ApplicationOrigin,
+  }));
+}
+
+app.get('/api/mc/apps/ios-enterprise', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const apps = await fetchAllMcIosEnterpriseApps();
+    apps.sort((a, b) => (a.AppName || '').localeCompare(b.AppName || ''));
+    res.json({ apps, total: apps.length, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/ios-enterprise]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function fetchAllMcMacEnterpriseApps() {
+  const token = await getMcToken();
+  const res = await fetch(
+    `${MC_BASE_URL}/MobiControl/api/appManagement/apple/macOS/apps/enterprise`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`MC macOS enterprise apps fetch failed (${res.status}): ${text}`);
+  }
+  const raw = await res.json();
+  const apps = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+  // Normalize macOS field names (Name/ApplicationIdOrUrl/IconUrl/ApplicationOrigin)
+  // to match the Android enterprise app shape, same as the iOS enterprise normalization above.
+  return apps.map(a => ({
+    ...a,
+    AppName: a.Name,
+    AppPackageId: a.ApplicationIdOrUrl,
+    AppIconUrl: a.IconUrl,
+    AppOriginType: a.ApplicationOrigin,
+  }));
+}
+
+app.get('/api/mc/apps/macos-enterprise', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const apps = await fetchAllMcMacEnterpriseApps();
+    apps.sort((a, b) => (a.AppName || '').localeCompare(b.AppName || ''));
+    res.json({ apps, total: apps.length, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/macos-enterprise]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Proxies the raw icon image bytes for a macOS enterprise app icon.
+app.get('/api/mc/apps/macos-enterprise/:referenceId/icon', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).end();
+  }
+  try {
+    const token = await getMcToken();
+    const mcRes = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/apple/common/apps/${encodeURIComponent(req.params.referenceId)}/icon?applicationKind=MacEnterprise`,
+      { headers: { Authorization: `Bearer ${token}`, 'Accept-Language': 'en-US' } }
+    );
+    if (!mcRes.ok) return res.status(mcRes.status).end();
+    const buf = Buffer.from(await mcRes.arrayBuffer());
+    res.set('Content-Type', mcRes.headers.get('content-type') || 'image/png');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buf);
+  } catch (err) {
+    console.error('[/api/mc/apps/macos-enterprise/:referenceId/icon]', err.message);
+    res.status(500).end();
+  }
+});
+
+// Proxies the raw icon image bytes for an iOS enterprise app icon, mirroring the
+// Android enterprise icon proxy so the bearer token never has to reach the browser.
+app.get('/api/mc/apps/ios-enterprise/:referenceId/icon', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).end();
+  }
+  try {
+    const token = await getMcToken();
+    const mcRes = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/apple/common/apps/${encodeURIComponent(req.params.referenceId)}/icon?applicationKind=IosEnterprise`,
+      { headers: { Authorization: `Bearer ${token}`, 'Accept-Language': 'en-US' } }
+    );
+    if (!mcRes.ok) return res.status(mcRes.status).end();
+    const buf = Buffer.from(await mcRes.arrayBuffer());
+    res.set('Content-Type', mcRes.headers.get('content-type') || 'image/png');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buf);
+  } catch (err) {
+    console.error('[/api/mc/apps/ios-enterprise/:referenceId/icon]', err.message);
+    res.status(500).end();
+  }
+});
+
+// Apple App Store apps aren't listed anywhere globally either — only per Apple
+// (iOS) app management policy — so this mirrors fetchAllMcPlayStoreApps: walk
+// every "Apple" family policy's app list and dedup by StrongId (the app's
+// bundle identifier), normalizing fields to match the Android enterprise shape.
+async function fetchAllApplePolicies() {
+  const token = await getMcToken();
+  const all = [];
+  const take = 200;
+  let skip = 0;
+
+  while (true) {
+    const res = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/policies?families=Apple&skip=${skip}&take=${take}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`MC Apple app policies fetch failed (${res.status}): ${text}`);
+    }
+    const raw  = await res.json();
+    const page = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+    all.push(...page);
+    if (page.length < take) break;
+    skip += take;
+  }
+  return all;
+}
+
+async function fetchAllMcAppleStoreApps() {
+  const token = await getMcToken();
+  const policies = await fetchAllApplePolicies();
+  const byBundleId = new Map();
+
+  for (const policy of policies) {
+    const res = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/apple/iOS/policies/${encodeURIComponent(policy.ReferenceId)}/apps`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!res.ok) continue; // skip policies we can't read rather than failing the whole catalog
+    const raw  = await res.json();
+    const list = raw.AppleStoreApplications || [];
+    list.forEach((entry) => {
+      const meta = entry.ApplicationMetadata;
+      if (!meta || !meta.StrongId || byBundleId.has(meta.StrongId)) return;
+      byBundleId.set(meta.StrongId, {
+        AppName: meta.Name,
+        AppVersion: meta.Version,
+        AppAuthor: meta.Seller,
+        AppPackageId: meta.StrongId,
+        AppOriginType: 'AppleAppStore',
+        ReferenceId: meta.ReferenceId,
+        _appleIconReferenceId: meta.ReferenceId,
+      });
+    });
+  }
+  return [...byBundleId.values()];
+}
+
+// Same active-status concept as the Android/Google Play lookups below, but for
+// Apple (iOS) family policies. One per-policy call returns both AppleStoreApplications
+// and EnterpriseApplications, so this covers both apple-appstore and ios-enterprise apps.
+app.get('/api/mc/apps/apple/active-status', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const policies = await fetchAllApplePolicies();
+    const candidates = policies.filter((p) => (p.Apps || 0) > 0);
+    const statuses = {}; // appId -> { active, policies: [{referenceId, name, status}] }
+
+    const recordEntry = (appId, policy) => {
+      if (!appId) return;
+      if (!statuses[appId]) statuses[appId] = { active: false, policies: [] };
+      statuses[appId].policies.push({ referenceId: policy.ReferenceId, name: policy.Name, status: policy.Status });
+      if (policy.Status === 'Assigned') statuses[appId].active = true;
+    };
+
+    for (const policy of candidates) {
+      const appsRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/apple/iOS/policies/${encodeURIComponent(policy.ReferenceId)}/apps`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!appsRes.ok) continue; // skip policies we can't read rather than failing the whole lookup
+      const raw = await appsRes.json();
+
+      (raw.AppleStoreApplications || []).forEach((entry) => {
+        const meta = entry.ApplicationMetadata;
+        recordEntry(meta && meta.ReferenceId, policy);
+      });
+      (raw.EnterpriseApplications || []).forEach((entry) => {
+        recordEntry(entry.ReferenceId || (entry.ApplicationMetadata && entry.ApplicationMetadata.ReferenceId), policy);
+      });
+    }
+
+    res.json({ statuses, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/apple/active-status]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/mc/apps/apple-appstore', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const apps = await fetchAllMcAppleStoreApps();
+    apps.sort((a, b) => (a.AppName || '').localeCompare(b.AppName || ''));
+    res.json({ apps, total: apps.length, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/apple-appstore]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Proxies the raw icon image bytes for an Apple App Store app icon, mirroring the
+// enterprise icon proxy so the bearer token never has to reach the browser.
+app.get('/api/mc/apps/apple/:referenceId/icon', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).end();
+  }
+  try {
+    const token = await getMcToken();
+    const mcRes = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/apple/common/apps/${encodeURIComponent(req.params.referenceId)}/icon?applicationKind=AppleStore`,
+      { headers: { Authorization: `Bearer ${token}`, 'Accept-Language': 'en-US' } }
+    );
+    if (!mcRes.ok) return res.status(mcRes.status).end();
+    const buf = Buffer.from(await mcRes.arrayBuffer());
+    res.set('Content-Type', mcRes.headers.get('content-type') || 'image/png');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buf);
+  } catch (err) {
+    console.error('[/api/mc/apps/apple/:referenceId/icon]', err.message);
+    res.status(500).end();
+  }
+});
+
+// Google Play Store apps aren't listed anywhere globally — only per Android app
+// management policy — so this walks every policy's Play Store app list and dedups
+// by AppPackageId, keeping the first (richest) copy of each and merging which
+// policies reference it (used for the active-status/applied-to lookups below).
+async function fetchAllMcPlayStoreApps() {
+  const token = await getMcToken();
+  const policies = await fetchAllAndroidAppPolicies();
+  const byPackageId = new Map();
+
+  for (const policy of policies) {
+    const res = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/android/policies/${encodeURIComponent(policy.ReferenceId)}/apps/googlePlayStore`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!res.ok) continue; // skip policies we can't read rather than failing the whole catalog
+    const raw  = await res.json();
+    const list = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+    list.forEach((a) => {
+      if (!a.AppPackageId) return;
+      if (!byPackageId.has(a.AppPackageId)) byPackageId.set(a.AppPackageId, a);
+    });
+  }
+  return [...byPackageId.values()];
+}
+
+// Joins AppPermissions (PermissionId + Allow/Deny state) with AvailableAppPermissions
+// (Name/Description, keyed by ExternalPermissionId) so each per-policy config can
+// show human-readable permission names alongside their per-policy Allow/Deny state.
+function mergeAppPermissions(item) {
+  const available = item.AvailableAppPermissions || [];
+  const states     = item.AppPermissions || [];
+  return states.map((s) => {
+    const info = available.find((a) => a.ExternalPermissionId === s.PermissionId);
+    return {
+      name: (info && info.Name) || s.PermissionId,
+      description: info && info.Description,
+      state: s.AppPermissionState,
+    };
+  });
+}
+
+// Android Enterprise apps can also be configured differently per policy — same
+// concept as the Google Play per-policy configs endpoint above.
+app.get('/api/mc/apps/enterprise/:appId/configs', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const appId = req.params.appId;
+
+  try {
+    const token = await getMcToken();
+    const policies = await fetchAllAndroidAppPolicies();
+    const configs = [];
+
+    for (const policy of policies) {
+      const appsRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/android/policies/${encodeURIComponent(policy.ReferenceId)}/apps/enterprise`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!appsRes.ok) continue;
+      const raw  = await appsRes.json();
+      const list = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+      const match = list.find((a) => a.ReferenceId === appId || a.AppPackageId === appId);
+      if (!match) continue;
+
+      configs.push({
+        policyReferenceId: policy.ReferenceId,
+        policyName: policy.Name,
+        policyStatus: policy.Status,
+        appConfiguration: match.AppConfiguration || null,
+        appConfigurationSchema: match.AppConfigurationSchema || null,
+        permissions: mergeAppPermissions(match),
+      });
+    }
+
+    res.json({ configs, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/enterprise/:appId/configs]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Apple (iOS enterprise + App Store) applied-to lookup — mirrors the Android
+// enterprise/Google Play versions above, but walks Apple-family policies instead.
+app.get('/api/mc/apps/apple/:appId/applied-to', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const appId = req.params.appId;
+
+  try {
+    const token = await getMcToken();
+    const policies = await fetchAllApplePolicies();
+
+    const matchedPolicies = [];
+    for (const policy of policies) {
+      const appsRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/apple/iOS/policies/${encodeURIComponent(policy.ReferenceId)}/apps`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!appsRes.ok) continue;
+      const raw = await appsRes.json();
+      const storeMatch = (raw.AppleStoreApplications || []).some((entry) =>
+        entry.ApplicationMetadata && entry.ApplicationMetadata.ReferenceId === appId);
+      const entMatch = (raw.EnterpriseApplications || []).some((entry) =>
+        entry.ReferenceId === appId || (entry.ApplicationMetadata && entry.ApplicationMetadata.ReferenceId === appId));
+      if (storeMatch || entMatch) matchedPolicies.push(policy);
+    }
+
+    const groupsMap = new Map();
+    const devices = [];
+    for (const policy of matchedPolicies) {
+      const asgRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/policies/${encodeURIComponent(policy.ReferenceId)}/assignment`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!asgRes.ok) continue;
+      const asg = await asgRes.json();
+
+      (asg.TargetDeviceGroups || []).forEach((g) => {
+        if (!g.DeviceGroupPath) return;
+        // Keyed by path+policy (not just path) — multiple policies can legitimately
+        // target the same group path, and each one needs its own visible entry rather
+        // than silently overwriting/hiding one another.
+        const key = `${g.DeviceGroupPath}::${policy.ReferenceId}`;
+        if (!groupsMap.has(key) || groupsMap.get(key).excluded) {
+          groupsMap.set(key, {
+            path: g.DeviceGroupPath,
+            excluded: !!g.Excluded,
+            policyReferenceId: policy.ReferenceId,
+            policyName: policy.Name || '',
+          });
+        }
+      });
+      (asg.TargetDevices || []).forEach((d) => {
+        devices.push({
+          deviceId:   d.DeviceId,
+          deviceName: d.DeviceName || '',
+          parentPath: d.ParentPath || '',
+          excluded:   !!d.Excluded,
+          policyName: policy.Name || '',
+          policyReferenceId: policy.ReferenceId,
+        });
+      });
+    }
+
+    res.json({
+      policies: matchedPolicies.map((p) => ({ referenceId: p.ReferenceId, name: p.Name, status: p.Status })),
+      groups:   [...groupsMap.values()],
+      devices,
+      lastUpdated: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[/api/mc/apps/apple/:appId/applied-to]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Apple (iOS enterprise + App Store) per-policy configs — one call per policy
+// returns both AppleStoreApplications and EnterpriseApplications, so this checks
+// both arrays for a matching app.
+app.get('/api/mc/apps/apple/:appId/configs', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const appId = req.params.appId;
+
+  try {
+    const token = await getMcToken();
+    const policies = await fetchAllApplePolicies();
+    const candidates = policies.filter((p) => (p.Apps || 0) > 0);
+    const configs = [];
+
+    for (const policy of candidates) {
+      const appsRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/apple/iOS/policies/${encodeURIComponent(policy.ReferenceId)}/apps`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!appsRes.ok) continue;
+      const raw = await appsRes.json();
+
+      const storeMatch = (raw.AppleStoreApplications || []).find((entry) =>
+        entry.ApplicationMetadata && entry.ApplicationMetadata.ReferenceId === appId);
+      const entMatch = (raw.EnterpriseApplications || []).find((entry) =>
+        entry.ReferenceId === appId || (entry.ApplicationMetadata && entry.ApplicationMetadata.ReferenceId === appId));
+      const match = storeMatch || entMatch;
+      if (!match) continue;
+
+      const cfg = match.ApplicationConfiguration || {};
+      configs.push({
+        policyReferenceId: policy.ReferenceId,
+        policyName: policy.Name,
+        policyStatus: policy.Status,
+        appConfiguration: cfg.AppConfiguration || null,
+        appConfigurationSchema: null,
+      });
+    }
+
+    res.json({ configs, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/apple/:appId/configs]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/mc/apps/googleplay', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const apps = await fetchAllMcPlayStoreApps();
+    apps.sort((a, b) => (a.AppName || '').localeCompare(b.AppName || ''));
+    res.json({ apps, total: apps.length, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/googleplay]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/mc/apps/googleplay/active-status', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const policies = await fetchAllAndroidAppPolicies();
+    const statuses = {}; // appPackageId -> { active, policies: [{referenceId, name, status}] }
+
+    for (const policy of policies) {
+      const appsRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/android/policies/${encodeURIComponent(policy.ReferenceId)}/apps/googlePlayStore`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!appsRes.ok) continue;
+      const raw  = await appsRes.json();
+      const list = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+
+      list.forEach((a) => {
+        if (!a.AppPackageId) return;
+        if (!statuses[a.AppPackageId]) statuses[a.AppPackageId] = { active: false, policies: [] };
+        statuses[a.AppPackageId].policies.push({ referenceId: policy.ReferenceId, name: policy.Name, status: policy.Status });
+        if (policy.Status === 'Assigned') statuses[a.AppPackageId].active = true;
+      });
+    }
+
+    res.json({ statuses, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/googleplay/active-status]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/mc/apps/googleplay/:appPackageId/applied-to', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const appPackageId = req.params.appPackageId;
+
+  try {
+    const token = await getMcToken();
+    const policies = await fetchAllAndroidAppPolicies();
+
+    const matchedPolicies = [];
+    for (const policy of policies) {
+      const appsRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/android/policies/${encodeURIComponent(policy.ReferenceId)}/apps/googlePlayStore`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!appsRes.ok) continue;
+      const raw  = await appsRes.json();
+      const list = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+      if (list.some((a) => a.AppPackageId === appPackageId)) matchedPolicies.push(policy);
+    }
+
+    const groupsMap = new Map();
+    const devices = [];
+    for (const policy of matchedPolicies) {
+      const asgRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/policies/${encodeURIComponent(policy.ReferenceId)}/assignment`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!asgRes.ok) continue;
+      const asg = await asgRes.json();
+
+      (asg.TargetDeviceGroups || []).forEach((g) => {
+        if (!g.DeviceGroupPath) return;
+        // Keyed by path+policy (not just path) — multiple policies can legitimately
+        // target the same group path, and each one needs its own visible entry rather
+        // than silently overwriting/hiding one another.
+        const key = `${g.DeviceGroupPath}::${policy.ReferenceId}`;
+        if (!groupsMap.has(key) || groupsMap.get(key).excluded) {
+          groupsMap.set(key, {
+            path: g.DeviceGroupPath,
+            excluded: !!g.Excluded,
+            policyReferenceId: policy.ReferenceId,
+            policyName: policy.Name || '',
+          });
+        }
+      });
+      (asg.TargetDevices || []).forEach((d) => {
+        devices.push({
+          deviceId:   d.DeviceId,
+          deviceName: d.DeviceName || '',
+          parentPath: d.ParentPath || '',
+          excluded:   !!d.Excluded,
+          policyName: policy.Name || '',
+          policyReferenceId: policy.ReferenceId,
+        });
+      });
+    }
+
+    res.json({
+      policies: matchedPolicies.map((p) => ({ referenceId: p.ReferenceId, name: p.Name, status: p.Status })),
+      groups:   [...groupsMap.values()],
+      devices,
+      lastUpdated: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[/api/mc/apps/googleplay/:appPackageId/applied-to]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// A Google Play app can be configured differently by each app management policy
+// that includes it — the catalog only shows one (first-seen) config, which can
+// mismatch the specific policy someone is troubleshooting. This walks every policy
+// and returns the app's config as configured by each one individually.
+app.get('/api/mc/apps/googleplay/:appPackageId/configs', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const appPackageId = req.params.appPackageId;
+
+  try {
+    const token = await getMcToken();
+    const policies = await fetchAllAndroidAppPolicies();
+    const configs = [];
+
+    for (const policy of policies) {
+      const appsRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/android/policies/${encodeURIComponent(policy.ReferenceId)}/apps/googlePlayStore`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!appsRes.ok) continue;
+      const raw  = await appsRes.json();
+      const list = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+      const match = list.find((a) => a.AppPackageId === appPackageId);
+      if (!match) continue;
+
+      configs.push({
+        policyReferenceId: policy.ReferenceId,
+        policyName: policy.Name,
+        policyStatus: policy.Status,
+        appConfiguration: match.AppConfiguration || null,
+        appConfigurationSchema: match.AppConfigurationSchema || null,
+        permissions: mergeAppPermissions(match),
+      });
+    }
+
+    res.json({ configs, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/googleplay/:appPackageId/configs]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Proxies the raw icon image bytes so <img src="/api/mc/apps/enterprise/:id/icon">
+// can be used directly in the browser without exposing the MC bearer token client-side.
+app.get('/api/mc/apps/enterprise/:referenceId/icon', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).end();
+  }
+  try {
+    const token = await getMcToken();
+    const mcRes = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/android/apps/enterprise/${encodeURIComponent(req.params.referenceId)}/icon`,
+      { headers: { Authorization: `Bearer ${token}`, 'Accept-Language': 'en-US' } }
+    );
+    if (!mcRes.ok) return res.status(mcRes.status).end();
+    const buf = Buffer.from(await mcRes.arrayBuffer());
+    res.set('Content-Type', mcRes.headers.get('content-type') || 'image/png');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buf);
+  } catch (err) {
+    console.error('[/api/mc/apps/enterprise/:referenceId/icon]', err.message);
+    res.status(500).end();
+  }
+});
+
+async function fetchAllAndroidAppPolicies() {
+  const token = await getMcToken();
+  const all = [];
+  const take = 200;
+  let skip = 0;
+
+  while (true) {
+    const res = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/policies?families=Android&skip=${skip}&take=${take}`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`MC app policies fetch failed (${res.status}): ${text}`);
+    }
+    const raw  = await res.json();
+    const page = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+    all.push(...page);
+    if (page.length < take) break;
+    skip += take;
+  }
+  return all;
+}
+
+// Given an app's ReferenceId/AppPackageId, finds which Android App Management Policies
+// include it, then resolves each matching policy's device group / device assignment.
+app.get('/api/mc/apps/enterprise/:appId/applied-to', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const appId = req.params.appId;
+
+  try {
+    const token = await getMcToken();
+    const policies = await fetchAllAndroidAppPolicies();
+    const candidates = policies.filter((p) => (p.Apps || 0) > 0);
+
+    const matchedPolicies = [];
+    for (const policy of candidates) {
+      const appsRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/android/policies/${encodeURIComponent(policy.ReferenceId)}/apps/enterprise`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!appsRes.ok) continue; // skip policies we can't read rather than failing the whole lookup
+      const raw  = await appsRes.json();
+      const list = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+      const found = list.some((a) => a.ReferenceId === appId || a.AppPackageId === appId);
+      if (found) matchedPolicies.push(policy);
+    }
+
+    const groupsMap = new Map(); // DeviceGroupPath -> { path, excluded }
+    const devices = [];
+    for (const policy of matchedPolicies) {
+      const asgRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/policies/${encodeURIComponent(policy.ReferenceId)}/assignment`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!asgRes.ok) continue;
+      const asg = await asgRes.json();
+
+      (asg.TargetDeviceGroups || []).forEach((g) => {
+        if (!g.DeviceGroupPath) return;
+        // Keyed by path+policy (not just path) — multiple policies can legitimately
+        // target the same group path, and each one needs its own visible entry rather
+        // than silently overwriting/hiding one another.
+        const key = `${g.DeviceGroupPath}::${policy.ReferenceId}`;
+        if (!groupsMap.has(key) || groupsMap.get(key).excluded) {
+          groupsMap.set(key, {
+            path: g.DeviceGroupPath,
+            excluded: !!g.Excluded,
+            policyReferenceId: policy.ReferenceId,
+            policyName: policy.Name || '',
+          });
+        }
+      });
+      (asg.TargetDevices || []).forEach((d) => {
+        devices.push({
+          deviceId:   d.DeviceId,
+          deviceName: d.DeviceName || '',
+          parentPath: d.ParentPath || '',
+          excluded:   !!d.Excluded,
+          policyName: policy.Name || '',
+          policyReferenceId: policy.ReferenceId,
+        });
+      });
+    }
+
+    res.json({
+      policies: matchedPolicies.map((p) => ({ referenceId: p.ReferenceId, name: p.Name, status: p.Status })),
+      groups:   [...groupsMap.values()],
+      devices,
+      lastUpdated: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[/api/mc/apps/enterprise/:appId/applied-to]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// One-pass version of the applied-to lookup, computed for every app at once instead of
+// one appId at a time: walks each Android policy's app list once and marks every app it
+// contains with that policy's Status, so "active" just means "in >=1 Assigned policy".
+// Skips the per-policy /assignment call entirely since Status alone is enough here.
+app.get('/api/mc/apps/enterprise/active-status', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const policies = await fetchAllAndroidAppPolicies();
+    const candidates = policies.filter((p) => (p.Apps || 0) > 0);
+
+    const statuses = {}; // appId -> { active, policies: [{referenceId, name, status}] }
+
+    for (const policy of candidates) {
+      const appsRes = await fetch(
+        `${MC_BASE_URL}/MobiControl/api/appManagement/android/policies/${encodeURIComponent(policy.ReferenceId)}/apps/enterprise`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+      );
+      if (!appsRes.ok) continue; // skip policies we can't read rather than failing the whole lookup
+      const raw  = await appsRes.json();
+      const list = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+
+      list.forEach((a) => {
+        const appId = a.ReferenceId || a.AppPackageId;
+        if (!appId) return;
+        if (!statuses[appId]) statuses[appId] = { active: false, policies: [] };
+        statuses[appId].policies.push({ referenceId: policy.ReferenceId, name: policy.Name, status: policy.Status });
+        if (policy.Status === 'Assigned') statuses[appId].active = true;
+      });
+    }
+
+    res.json({ statuses, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/enterprise/active-status]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/mc/apps/enterprise/:appId/logs', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const { deviceId, ruleReferenceId, startDate, endDate, severities, skip, take } = req.query;
+  if (!deviceId || !ruleReferenceId || !startDate || !endDate) {
+    return res.status(400).json({ error: 'deviceId, ruleReferenceId, startDate, and endDate are required' });
+  }
+  try {
+    const token = await getMcToken();
+    const params = new URLSearchParams({ deviceId, ruleReferenceId, startDate, endDate });
+    if (skip) params.set('Skip', skip);
+    if (take) params.set('Take', take);
+    const sevList = Array.isArray(severities) ? severities : (severities ? [severities] : []);
+    sevList.forEach((s) => params.append('severities', s));
+
+    const url = `${MC_BASE_URL}/MobiControl/api/appManagement/android/apps/enterprise/${encodeURIComponent(req.params.appId)}/appFeedbackDetails?${params.toString()}`;
+    const mcRes = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } });
+    const text = await mcRes.text();
+    if (!mcRes.ok) return res.status(mcRes.status).json({ error: text });
+    res.json({ logs: text ? JSON.parse(text) : [] });
+  } catch (err) {
+    console.error('[/api/mc/apps/enterprise/:appId/logs]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk app policy list — every Android + Apple app management policy, powering a
+// standalone "App Policies" browsing area (independent of drilling into an app first).
+app.get('/api/mc/apps/policies', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const [android, apple] = await Promise.all([fetchAllAndroidAppPolicies(), fetchAllApplePolicies()]);
+    const policies = [...android, ...apple];
+    policies.sort((a, b) => (a.Name || '').localeCompare(b.Name || ''));
+    res.json({ policies, total: policies.length, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/policies]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Apps pushed by a specific policy — family-specific since Android and Apple
+// policies expose their app lists via different endpoint shapes.
+app.get('/api/mc/apps/policies/:id/apps', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const family = req.query.family;
+  if (family !== 'Android' && family !== 'Apple') {
+    return res.status(400).json({ error: 'family query param (Android or Apple) is required' });
+  }
+  try {
+    const token = await getMcToken();
+    const apps = [];
+
+    if (family === 'Android') {
+      const [entRes, playRes] = await Promise.all([
+        fetch(`${MC_BASE_URL}/MobiControl/api/appManagement/android/policies/${encodeURIComponent(req.params.id)}/apps/enterprise`,
+          { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }),
+        fetch(`${MC_BASE_URL}/MobiControl/api/appManagement/android/policies/${encodeURIComponent(req.params.id)}/apps/googlePlayStore`,
+          { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }),
+      ]);
+      if (entRes.ok) {
+        const raw = await entRes.json();
+        (Array.isArray(raw) ? raw : (raw.items || raw.data || [])).forEach((a) =>
+          apps.push({ name: a.AppName, packageId: a.AppPackageId, version: a.AppVersion, source: 'Enterprise' }));
+      }
+      if (playRes.ok) {
+        const raw = await playRes.json();
+        (Array.isArray(raw) ? raw : (raw.items || raw.data || [])).forEach((a) =>
+          apps.push({ name: a.AppName, packageId: a.AppPackageId, version: a.AppVersion, source: 'GooglePlayStore' }));
+      }
+    } else {
+      const r = await fetch(`${MC_BASE_URL}/MobiControl/api/appManagement/apple/iOS/policies/${encodeURIComponent(req.params.id)}/apps`,
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } });
+      if (r.ok) {
+        const raw = await r.json();
+        (raw.AppleStoreApplications || []).forEach((entry) => {
+          const meta = entry.ApplicationMetadata || {};
+          apps.push({ name: meta.Name, packageId: meta.StrongId, version: meta.Version, source: 'AppleAppStore' });
+        });
+        (raw.EnterpriseApplications || []).forEach((entry) => {
+          const meta = entry.ApplicationMetadata || entry;
+          apps.push({ name: meta.Name, packageId: meta.StrongId || meta.ApplicationIdOrUrl, version: meta.Version, source: 'Enterprise' });
+        });
+      }
+    }
+
+    res.json({ apps, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/policies/:id/apps]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Group/device assignment for a specific policy — simpler than the app-level
+// applied-to endpoints since we already know exactly which policy to check.
+app.get('/api/mc/apps/policies/:id/applied-to', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const asgRes = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/appManagement/policies/${encodeURIComponent(req.params.id)}/assignment`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!asgRes.ok) {
+      const text = await asgRes.text();
+      return res.status(asgRes.status).json({ error: text });
+    }
+    const asg = await asgRes.json();
+    const groups = (asg.TargetDeviceGroups || []).filter((g) => !g.Excluded).map((g) => g.DeviceGroupPath);
+    const devices = (asg.TargetDevices || []).filter((d) => !d.Excluded).map((d) => ({
+      deviceId: d.DeviceId, deviceName: d.DeviceName || '', parentPath: d.ParentPath || '',
+    }));
+    res.json({ groups, devices, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/apps/policies/:id/applied-to]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Full app management policy log — everything MobiControl logged for this policy
+// across ALL devices, not scoped to a single device like appFeedbackDetails above.
+app.get('/api/mc/apps/policies/:policyReferenceId/logs', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const { startDate, endDate, logSeverities, skip, take } = req.query;
+  if (!startDate || !endDate) {
+    return res.status(400).json({ error: 'startDate and endDate are required' });
+  }
+  try {
+    const token = await getMcToken();
+    const params = new URLSearchParams({ startDate, endDate, orderByDesc: 'true' });
+    if (skip) params.set('skip', skip);
+    if (take) params.set('take', take);
+    const sevList = Array.isArray(logSeverities) ? logSeverities : (logSeverities ? [logSeverities] : []);
+    sevList.forEach((s) => params.append('logSeverities', s));
+
+    const url = `${MC_BASE_URL}/MobiControl/api/appManagement/policies/${encodeURIComponent(req.params.policyReferenceId)}/logs?${params.toString()}`;
+    const mcRes = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } });
+    const text = await mcRes.text();
+    if (!mcRes.ok) return res.status(mcRes.status).json({ error: text });
+    res.json({ logs: text ? JSON.parse(text) : [] });
+  } catch (err) {
+    console.error('[/api/mc/apps/policies/:policyReferenceId/logs]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Saved Views (shared across all users hitting this server) ────────────────
+
+app.get('/api/views/:scope', (req, res) => {
+  const rows = db.prepare('SELECT id, name, config, created_at FROM saved_views WHERE scope = ? ORDER BY name COLLATE NOCASE')
+    .all(req.params.scope);
+  res.json({ views: rows.map((r) => ({ id: r.id, name: r.name, config: JSON.parse(r.config), createdAt: r.created_at })) });
+});
+
+app.post('/api/views/:scope', (req, res) => {
+  const { name, config } = req.body || {};
+  if (!name || !String(name).trim()) return res.status(400).json({ error: 'name is required' });
+  if (!config || typeof config !== 'object') return res.status(400).json({ error: 'config is required' });
+  const info = db.prepare('INSERT INTO saved_views (scope, name, config, created_at) VALUES (?, ?, ?, ?)')
+    .run(req.params.scope, String(name).trim(), JSON.stringify(config), new Date().toISOString());
+  res.json({ id: info.lastInsertRowid });
+});
+
+app.delete('/api/views/:scope/:id', (req, res) => {
+  db.prepare('DELETE FROM saved_views WHERE scope = ? AND id = ?').run(req.params.scope, req.params.id);
+  res.json({ ok: true });
 });
 
 // ─── Ping Routes ──────────────────────────────────────────────────────────────
