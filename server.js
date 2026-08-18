@@ -534,10 +534,10 @@ const PING_CHECK_PORTS   = [443, 5084];
 const READER_ENDPOINTS   = ['/cloud/version', '/cloud/status', '/api/v1/config/readerConfig', '/api/v1/readerInfo', '/api/v1/status'];
 
 const DEFAULT_PING_HOSTS = [
-  { addr: '10.180.1.251', label: 'Inventory Joey #1 (Now 54)' },
+  { addr: '10.180.1.251', label: 'Inventory Joey #1 (Now 53)' },
   { addr: '10.180.1.252', label: 'Inventory Joey #2 (Now 52)' },
   { addr: '10.180.1.253', label: 'Inventory Joey #3' },
-  { addr: '10.180.2.2',   label: 'OF Joey #11' },
+  { addr: '10.180.2.23',  label: 'OF Joey #11' },
   { addr: '10.180.2.1',   label: 'OF Joey #12' },
   { addr: '10.180.2.3',   label: 'OF Joey #14' },
   { addr: '10.180.2.5',   label: 'OF Joey #16' },
@@ -547,24 +547,21 @@ const DEFAULT_PING_HOSTS = [
   { addr: '10.180.2.9',   label: 'OF Joey #20' },
   { addr: '10.180.2.10',  label: 'OF Joey #21' },
   { addr: '10.180.0.174', label: 'OF Joey #22' },
-  { addr: '10.180.2.11',  label: 'OF Joey #23' },
+  { addr: '10.180.1.0',   label: 'OF Joey #23' },
   { addr: '10.180.2.12',  label: 'OF Joey #24' },
   { addr: '10.180.2.13',  label: 'OF Joey #25' },
   { addr: '10.180.2.14',  label: 'OF Joey #26' },
   { addr: '10.180.2.15',  label: 'OF Joey #27' },
-  { addr: '10.180.0.238', label: 'OF Joey #28' },
+  { addr: '10.180.2.25',  label: 'OF Joey #28' },
   { addr: '10.180.2.17',  label: 'OF Joey #29' },
   { addr: '10.180.2.18',  label: 'OF Joey #30' },
   { addr: '10.180.2.19',  label: 'OF Joey #31' },
   { addr: '10.180.2.20',  label: 'OF Joey #32' },
   { addr: '10.180.2.21',  label: 'OF Joey #33' },
-  { addr: '10.180.2.22',  label: 'OF Joey #34' },
-  { addr: '10.180.1.254', label: 'OF Joey #35' },
-  { addr: '10.180.2.24',  label: 'OF Joey #38' },
-  { addr: '10.180.2.25',  label: 'OF Joey #39' },
+  { addr: '10.180.2.24',  label: 'OF Joey #34' },
+  { addr: '10.180.1.254', label: 'OF Joey #35 (Formally unmarked Joey #1)' },
   { addr: '10.180.2.26',  label: 'OF Joey #40' },
   { addr: '10.180.2.27',  label: 'Facilities RFID Reader' },
-  { addr: '10.180.1.225', label: 'Unmounted RFID Reader' },
 ];
 
 const pingState = {
