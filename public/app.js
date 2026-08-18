@@ -2875,7 +2875,7 @@
     const frag = document.createDocumentFragment();
     hosts.forEach((h, i) => {
       const tr = document.createElement('tr');
-      if (h.status === 'down') tr.classList.add('row-offline');
+      if (h.status === 'down') tr.classList.add(h.ever_up ? 'row-alert' : 'row-offline');
 
       tr.innerHTML = [
         `<td style="color:var(--color-text-muted);font-family:var(--font-mono);font-size:11px">${i + 1}</td>`,
