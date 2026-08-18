@@ -2868,7 +2868,7 @@
     pingTab.el.rowCount.textContent = hosts.length > 0 ? `${hosts.length} host${hosts.length !== 1 ? 's' : ''}` : '';
 
     if (!hosts.length) {
-      tbody.innerHTML = `<tr class="table-placeholder"><td colspan="10">No hosts yet — load an Excel file or add a host above</td></tr>`;
+      tbody.innerHTML = `<tr class="table-placeholder"><td colspan="11">No hosts yet — load an Excel file or add a host above</td></tr>`;
       return;
     }
 
@@ -2884,6 +2884,7 @@
         `<td>${buildPingStatusBadge(h)}</td>`,
         `<td>${buildPortTags(h.ports)}</td>`,
         `<td>${buildApiInfo(h.api)}</td>`,
+        `<td>${buildApiCachedAt(h.api)}</td>`,
         `<td class="ping-latency ${latClass(h.latency)}">${h.latency != null ? h.latency + 'ms' : '—'}</td>`,
         `<td class="ping-checked">${h.checked || '—'}</td>`,
         `<td>${buildMiniHist(h.history)}</td>`,
@@ -2942,6 +2943,13 @@
     const title = api.stale ? ` title="Cached — last confirmed ${api.lastSeenAt ? esc(api.lastSeenAt) : 'unknown'}"` : '';
     const tag   = api.stale ? '<span class="api-stale-tag">cached</span>' : '';
     return `<div class="${cls}"${title}>` + parts.join('<span class="api-sep">&nbsp;·&nbsp;</span>') + tag + '</div>';
+  }
+
+  function buildApiCachedAt(api) {
+    if (!api || !api.stale || !api.lastSeenAt) return '<span class="cell-na">—</span>';
+    const d = new Date(api.lastSeenAt);
+    if (isNaN(d)) return '<span class="cell-na">—</span>';
+    return `<span title="${esc(api.lastSeenAt)}">${relativeTime(d)}</span>`;
   }
 
   function buildMiniHist(history) {
