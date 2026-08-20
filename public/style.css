@@ -420,6 +420,9 @@ button {
   flex-wrap: wrap;
 }
 
+.report-min-days-group { display: flex; align-items: center; gap: 8px; }
+.report-min-days-group.hidden { display: none; }
+
 .filter-search-wrap {
   position: relative;
   flex: 1;
