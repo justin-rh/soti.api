@@ -23,11 +23,12 @@
     apppolicies:  'App Policy Detail',
     ping:         'RFID Reader Status',
     portals:      'Portal Availability Monitor',
+    reporting:    'Device Reports',
   };
 
   // ─── Tab switching ───────────────────────────────────────────────────────────
 
-  const MOBICONTROL_GROUP_TABS = ['mobicontrol', 'advsettings', 'mcapps', 'profiles', 'apppolicies'];
+  const MOBICONTROL_GROUP_TABS = ['mobicontrol', 'advsettings', 'mcapps', 'profiles', 'apppolicies', 'reporting'];
 
   function switchTab(name) {
     activeTab = name;
@@ -51,6 +52,7 @@
     if (name === 'mcapps') loadMcAppsIfNeeded();
     if (name === 'profiles' && !profilesTab.loaded) fetchProfilesList();
     if (name === 'apppolicies' && !appPoliciesTab.loaded) fetchAppPoliciesList();
+    if (name === 'reporting') loadReportIfNeeded();
 
     if (elHeaderSubtitle) elHeaderSubtitle.textContent = TAB_SUBTITLES[name] || '';
 
@@ -77,6 +79,9 @@
     } else if (name === 'apppolicies') {
       elCountdown.textContent   = 'No auto-refresh';
       elLastUpdated.textContent = appPoliciesTab.lastUpdatedText || 'Not loaded yet';
+    } else if (name === 'reporting') {
+      elCountdown.textContent   = 'No auto-refresh';
+      elLastUpdated.textContent = activeState().lastUpdatedText || 'Not loaded yet';
     } else {
       const st = name === 'connect' ? connect : mc;
       elCountdown.textContent   = st.countdownValue + 's';
@@ -139,6 +144,138 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  //   View & Column Management (shared across tabs)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Generic CSV download helper
+  function downloadCsvData(filename, headers, rows) {
+    const lines = [headers.join(',')];
+    rows.forEach((row) => {
+      lines.push(row.map((cell) => {
+        const str = String(cell || '');
+        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+          return `"${str.replace(/"/g, '""')}"`;
+        }
+        return str;
+      }).join(','));
+    });
+    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Generic view management
+  const viewStates = {
+    connect: { hidden: new Set(), views: [], activeId: null },
+    mobicontrol: { hidden: new Set(), views: [], activeId: null },
+    portals: { hidden: new Set(), views: [], activeId: null },
+    profiles: { hidden: new Set(), views: [], activeId: null },
+    apppolicies: { hidden: new Set(), views: [], activeId: null },
+  };
+
+  async function loadViews(scope) {
+    try {
+      const res = await fetch(`/api/views/${scope}`);
+      const data = await res.json();
+      viewStates[scope].views = data.views || [];
+    } catch (_) {
+      viewStates[scope].views = [];
+    }
+  }
+
+  function renderColumnsDropdown(scope, allColumns, hiddenColsSet) {
+    const list = document.getElementById(`${scope}-columns-list`);
+    if (!list) return;
+    list.innerHTML = allColumns.map((col) => {
+      const isHidden = hiddenColsSet.has(col.key);
+      return `
+        <label class="tab-dropdown-item" style="display:flex;align-items:center;gap:8px;padding:4px 8px;">
+          <input type="checkbox" class="col-toggle" data-col="${col.key}" ${!isHidden ? 'checked' : ''} style="cursor:pointer;" />
+          <span style="cursor:pointer;flex:1;">${col.label}</span>
+        </label>
+      `;
+    }).join('');
+    list.querySelectorAll('.col-toggle').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        if (cb.checked) hiddenColsSet.delete(cb.dataset.col);
+        else hiddenColsSet.add(cb.dataset.col);
+        // Trigger re-render based on scope
+        if (scope === 'connect') renderConnectTable();
+        else if (scope === 'mobicontrol') renderMcTable();
+        else if (scope === 'portals') renderPortalsTable();
+        else if (scope === 'apppolicies') renderAppPoliciesList();
+        else if (scope === 'profiles') renderProfilesList();
+      });
+    });
+  }
+
+  function toggleColumnDropdown(scope) {
+    const btn = document.getElementById(`${scope}-columns-btn`);
+    const dropdown = document.getElementById(`${scope}-columns-dropdown`);
+    if (!dropdown) return;
+    const isOpen = !dropdown.classList.contains('hidden');
+    if (isOpen) dropdown.classList.add('hidden');
+    else dropdown.classList.remove('hidden');
+    btn.setAttribute('aria-expanded', !isOpen);
+  }
+
+  function toggleViewsDropdown(scope) {
+    const btn = document.getElementById(`${scope}-views-btn`);
+    const dropdown = document.getElementById(`${scope}-views-dropdown`);
+    if (!dropdown) return;
+    const isOpen = !dropdown.classList.contains('hidden');
+    if (isOpen) dropdown.classList.add('hidden');
+    else dropdown.classList.remove('hidden');
+    btn.setAttribute('aria-expanded', !isOpen);
+  }
+
+  async function saveView(scope, renderFn, configFn) {
+    const name = window.prompt('Name this view:');
+    if (!name || !name.trim()) return;
+    try {
+      const res = await fetch(`/api/views/${scope}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), config: configFn() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save');
+      await loadViews(scope);
+      renderFn(scope);
+    } catch (e) {
+      alert('Could not save view: ' + e.message);
+    }
+  }
+
+  // Apply column visibility by adding CSS rules
+  function applyColumnVisibility(scope, table, columns) {
+    const hidden = viewStates[scope].hidden;
+    const style = document.getElementById(`${scope}-col-visibility`);
+    if (style) style.remove();
+
+    const newStyle = document.createElement('style');
+    newStyle.id = `${scope}-col-visibility`;
+
+    const rules = columns
+      .map((col, idx) => {
+        if (!hidden.has(col.key)) return null;
+        // Hide both th and td for the column using original index
+        const thSelector = `#${table} thead th:nth-child(${idx + 1})`;
+        const tdSelector = `#${table} tbody td:nth-child(${idx + 1})`;
+        return `${thSelector}, ${tdSelector} { display: none; }`;
+      })
+      .filter(Boolean)
+      .join('\n');
+
+    if (rules) newStyle.textContent = rules;
+    document.head.appendChild(newStyle);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   //   SOTI CONNECT TAB
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -152,7 +289,7 @@
     el:             {},
   };
 
-  function initConnect() {
+  async function initConnect() {
     const e = connect.el;
     e.errorBanner     = document.getElementById('error-banner');
     e.errorMessage    = document.getElementById('error-message');
@@ -194,8 +331,190 @@
       });
     });
 
+    // Column and view management for Connect
+    const connectColumns = [
+      { key: 'name', label: 'Name' },
+      { key: 'model', label: 'Model' },
+      { key: 'group', label: 'Group' },
+      { key: 'ip', label: 'IP Address' },
+      { key: 'status', label: 'Status' },
+      { key: 'battery', label: 'Battery' },
+      { key: 'lastSeen', label: 'Last Contact' },
+      { key: 'firmware', label: 'Firmware' },
+      { key: 'description', label: 'Description' },
+      { key: 'alert', label: 'Alert' },
+      { key: 'rfid', label: 'RFID' },
+      { key: 'activity', label: 'Activity' },
+    ];
+    renderColumnsDropdown('connect', connectColumns, viewStates.connect.hidden);
+
+    const connectCsvBtn = document.getElementById('connect-csv-btn');
+    if (connectCsvBtn) {
+      connectCsvBtn.addEventListener('click', () => {
+        const headers = ['Name', 'Model', 'Group', 'IP', 'Status', 'Battery', 'Last Seen', 'Firmware', 'Description', 'Alert', 'RFID', 'Activity'];
+        const rows = connect.devices.map((d) => [
+          d.name || '',
+          d.model || '',
+          d.group || '',
+          d.ip || '',
+          d.connectionStatus === 1 ? 'Online' : 'Offline',
+          d.battery !== null ? `${d.battery}%` : '',
+          d.lastSeen || '',
+          d.firmware || '',
+          d.description || '',
+          d.hasAlert ? (d.alert?.id || 'Alert') : '',
+          d.voidCount !== null ? `${d.voidCount} void` : '',
+          d.printActivity?.state || '',
+        ]);
+        downloadCsvData('soti-printers.csv', headers, rows);
+      });
+    }
+
+    const connectSaveViewBtn = document.getElementById('connect-save-view-btn');
+    if (connectSaveViewBtn) {
+      connectSaveViewBtn.addEventListener('click', () => {
+        saveView('connect', renderConnectViewsMenu, () => ({
+          search: connect.el.filterSearch.value,
+          status: connect.el.filterStatus.value,
+          group: connect.el.filterGroup.value,
+          sortKey: connect.sort.key,
+          sortDir: connect.sort.dir,
+          hiddenCols: [...viewStates.connect.hidden],
+        }));
+      });
+    }
+
+    await loadViews('connect');
+    renderConnectViewsMenu();
+
     startConnectCountdown();
     refreshConnect();
+  }
+
+  function renderConnectViewsMenu() {
+    const list = document.getElementById('connect-views-list');
+    if (!list) return;
+
+    const activeView = viewStates.connect.views.find((v) => String(v.id) === viewStates.connect.activeId);
+    const btn = document.getElementById('connect-views-btn');
+    if (btn) {
+      btn.innerHTML = activeView
+        ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;margin-right:4px;vertical-align:middle;"></span>View: ${esc(activeView.name)} <span class="tab-chevron">▾</span>`
+        : `Views <span class="tab-chevron">▾</span>`;
+    }
+
+    const defaultRow = `
+      <button type="button" class="tab-dropdown-item ${viewStates.connect.activeId === null ? 'tab-dropdown-item--active' : ''}" data-connect-view-default>
+        <span class="tab-dropdown-item-dot"></span>Default (all columns)
+      </button>`;
+
+    if (!viewStates.connect.views.length) {
+      list.innerHTML = defaultRow + '<div class="tab-dropdown-empty">No saved views yet</div>';
+    } else {
+      list.innerHTML = defaultRow + viewStates.connect.views.map((v) => `
+        <div class="tab-dropdown-view-row">
+          <button type="button" class="tab-dropdown-item ${viewStates.connect.activeId === String(v.id) ? 'tab-dropdown-item--active' : ''}" data-connect-view-id="${v.id}">
+            <span class="tab-dropdown-item-dot"></span>${esc(v.name)}
+          </button>
+          <button type="button" class="tab-dropdown-view-delete" data-connect-view-delete="${v.id}" title="Delete view">✕</button>
+        </div>
+      `).join('');
+    }
+
+    const defaultBtn = list.querySelector('[data-connect-view-default]');
+    if (defaultBtn) {
+      defaultBtn.addEventListener('click', () => {
+        connect.el.filterSearch.value = '';
+        connect.el.filterStatus.value = '';
+        connect.el.filterGroup.value = '';
+        viewStates.connect.hidden.clear();
+        connect.sort = { key: null, dir: 'asc' };
+        viewStates.connect.activeId = null;
+        renderColumnsDropdown('connect', [
+          { key: 'name', label: 'Name' },
+          { key: 'model', label: 'Model' },
+          { key: 'group', label: 'Group' },
+          { key: 'ip', label: 'IP Address' },
+          { key: 'status', label: 'Status' },
+          { key: 'battery', label: 'Battery' },
+          { key: 'lastSeen', label: 'Last Contact' },
+          { key: 'firmware', label: 'Firmware' },
+          { key: 'description', label: 'Description' },
+          { key: 'alert', label: 'Alert' },
+          { key: 'rfid', label: 'RFID' },
+          { key: 'activity', label: 'Activity' },
+        ], viewStates.connect.hidden);
+        renderConnectViewsMenu();
+        renderConnectTable();
+        document.getElementById('connect-views-dropdown').classList.add('hidden');
+      });
+    }
+
+    list.querySelectorAll('[data-connect-view-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const view = viewStates.connect.views.find((v) => String(v.id) === btn.dataset.connectViewId);
+        if (!view) return;
+        connect.el.filterSearch.value = view.config.search || '';
+        connect.el.filterStatus.value = view.config.status || '';
+        connect.el.filterGroup.value = view.config.group || '';
+        viewStates.connect.hidden = new Set(view.config.hiddenCols || []);
+        connect.sort = { key: view.config.sortKey || null, dir: view.config.sortDir || 'asc' };
+        viewStates.connect.activeId = String(view.id);
+        renderColumnsDropdown('connect', [
+          { key: 'name', label: 'Name' },
+          { key: 'model', label: 'Model' },
+          { key: 'group', label: 'Group' },
+          { key: 'ip', label: 'IP Address' },
+          { key: 'status', label: 'Status' },
+          { key: 'battery', label: 'Battery' },
+          { key: 'lastSeen', label: 'Last Contact' },
+          { key: 'firmware', label: 'Firmware' },
+          { key: 'description', label: 'Description' },
+          { key: 'alert', label: 'Alert' },
+          { key: 'rfid', label: 'RFID' },
+          { key: 'activity', label: 'Activity' },
+        ], viewStates.connect.hidden);
+        updateConnectSortHeaders();
+        renderConnectViewsMenu();
+        renderConnectTable();
+        document.getElementById('connect-views-dropdown').classList.add('hidden');
+      });
+    });
+
+    list.querySelectorAll('[data-connect-view-delete]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.connectViewDelete;
+        if (viewStates.connect.activeId === String(id)) viewStates.connect.activeId = null;
+        try {
+          await fetch(`/api/views/connect/${id}`, { method: 'DELETE' });
+          await loadViews('connect');
+          renderConnectViewsMenu();
+        } catch (_) {}
+      });
+    });
+
+    // Add Save View button at the bottom
+    const divider = document.createElement('div');
+    divider.className = 'tab-dropdown-divider';
+    list.appendChild(divider);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'tab-dropdown-item';
+    saveBtn.textContent = '💾 Save Current View';
+    saveBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveView('connect', renderConnectViewsMenu, () => ({
+        search: connect.el.filterSearch.value,
+        status: connect.el.filterStatus.value,
+        group: connect.el.filterGroup.value,
+        sortKey: connect.sort.key,
+        sortDir: connect.sort.dir,
+        hiddenCols: [...viewStates.connect.hidden],
+      }));
+    });
+    list.appendChild(saveBtn);
   }
 
   function startConnectCountdown() {
@@ -326,6 +645,23 @@
     sorted.forEach((d) => frag.appendChild(buildConnectRow(d)));
     connect.el.tableBody.innerHTML = '';
     connect.el.tableBody.appendChild(frag);
+
+    // Apply column visibility
+    const connectColumns = [
+      { key: 'name', label: 'Name' },
+      { key: 'model', label: 'Model' },
+      { key: 'group', label: 'Group' },
+      { key: 'ip', label: 'IP Address' },
+      { key: 'status', label: 'Status' },
+      { key: 'battery', label: 'Battery' },
+      { key: 'lastSeen', label: 'Last Contact' },
+      { key: 'firmware', label: 'Firmware' },
+      { key: 'description', label: 'Description' },
+      { key: 'alert', label: 'Alert' },
+      { key: 'rfid', label: 'RFID' },
+      { key: 'activity', label: 'Activity' },
+    ];
+    applyColumnVisibility('connect', 'printer-table', connectColumns);
   }
 
   function simplePrintBaseUrl() {
@@ -473,6 +809,7 @@
     el:             {},
     expandedId:     null,
     detailCache:    {}, // { [deviceId]: { status: 'loading'|'loaded'|'error', data, error } }
+    notesCache:     {}, // { [deviceId]: { status: 'loading'|'loaded'|'error', notes, error } }
     compareIds:     [], // up to 2 device ids selected for comparison
   };
 
@@ -527,8 +864,194 @@
       });
     });
 
+    // Column and view management for MobiControl
+    const mcColumns = [
+      { key: 'name', label: 'Name' },
+      { key: 'platform', label: 'Platform' },
+      { key: 'model', label: 'Model' },
+      { key: 'group', label: 'Group' },
+      { key: 'status', label: 'Status' },
+      { key: 'osVersion', label: 'OS Version' },
+      { key: 'firmware', label: 'Firmware' },
+      { key: 'lastCheckIn', label: 'Last Check-in' },
+      { key: 'userName', label: 'User' },
+      { key: 'compliance', label: 'Compliance' },
+    ];
+    renderColumnsDropdown('mobicontrol', mcColumns, viewStates.mobicontrol.hidden);
+
+    const mcCsvBtn = document.getElementById('mc-csv-btn');
+    if (mcCsvBtn) {
+      mcCsvBtn.addEventListener('click', () => {
+        const headers = ['Name', 'Platform', 'Model', 'Group', 'Status', 'OS Version', 'Firmware', 'Last Check-in', 'User', 'Compliance', 'Serial', 'IP'];
+        const rows = mc.devices.map((d) => [
+          d.name || '',
+          d.platform || '',
+          d.model || '',
+          d.group || '',
+          d.status || '',
+          d.osVersion || '',
+          d.firmware || '',
+          d.lastCheckIn ? new Date(d.lastCheckIn).toLocaleString() : '',
+          d.userName || '',
+          d.compliance || '',
+          d.serial || '',
+          d.ip || '',
+        ]);
+        downloadCsvData('mobicontrol-devices.csv', headers, rows);
+      });
+    }
+
+    const mcSaveViewBtn = document.getElementById('mc-save-view-btn');
+    if (mcSaveViewBtn) {
+      mcSaveViewBtn.addEventListener('click', () => {
+        saveView('mobicontrol', renderMcViewsMenu, () => ({
+          search: mc.el.filterSearch.value,
+          platform: mc.el.filterPlatform.value,
+          status: mc.el.filterStatus.value,
+          compliance: mc.el.filterCompliance.value,
+          group: mc.el.filterGroup.value,
+          sortKey: mc.sort.key,
+          sortDir: mc.sort.dir,
+          hiddenCols: [...viewStates.mobicontrol.hidden],
+        }));
+      });
+    }
+
+    (async () => {
+      await loadViews('mobicontrol');
+      renderMcViewsMenu();
+    })();
+
     startMcCountdown();
     refreshMc();
+  }
+
+  function renderMcViewsMenu() {
+    const list = document.getElementById('mc-views-list');
+    if (!list) return;
+
+    const activeView = viewStates.mobicontrol.views.find((v) => String(v.id) === viewStates.mobicontrol.activeId);
+    const btn = document.getElementById('mc-views-btn');
+    if (btn) {
+      btn.innerHTML = activeView
+        ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;margin-right:4px;vertical-align:middle;"></span>View: ${esc(activeView.name)} <span class="tab-chevron">▾</span>`
+        : `Views <span class="tab-chevron">▾</span>`;
+    }
+
+    const defaultRow = `
+      <button type="button" class="tab-dropdown-item ${viewStates.mobicontrol.activeId === null ? 'tab-dropdown-item--active' : ''}" data-mc-view-default>
+        <span class="tab-dropdown-item-dot"></span>Default (all columns)
+      </button>`;
+
+    if (!viewStates.mobicontrol.views.length) {
+      list.innerHTML = defaultRow + '<div class="tab-dropdown-empty">No saved views yet</div>';
+    } else {
+      list.innerHTML = defaultRow + viewStates.mobicontrol.views.map((v) => `
+        <div class="tab-dropdown-view-row">
+          <button type="button" class="tab-dropdown-item ${viewStates.mobicontrol.activeId === String(v.id) ? 'tab-dropdown-item--active' : ''}" data-mc-view-id="${v.id}">
+            <span class="tab-dropdown-item-dot"></span>${esc(v.name)}
+          </button>
+          <button type="button" class="tab-dropdown-view-delete" data-mc-view-delete="${v.id}" title="Delete view">✕</button>
+        </div>
+      `).join('');
+    }
+
+    const defaultBtn = list.querySelector('[data-mc-view-default]');
+    if (defaultBtn) {
+      defaultBtn.addEventListener('click', () => {
+        mc.el.filterSearch.value = '';
+        mc.el.filterPlatform.value = '';
+        mc.el.filterStatus.value = '';
+        mc.el.filterCompliance.value = '';
+        mc.el.filterGroup.value = '';
+        viewStates.mobicontrol.hidden.clear();
+        mc.sort = { key: null, dir: 'asc' };
+        viewStates.mobicontrol.activeId = null;
+        renderColumnsDropdown('mobicontrol', [
+          { key: 'name', label: 'Name' },
+          { key: 'platform', label: 'Platform' },
+          { key: 'model', label: 'Model' },
+          { key: 'group', label: 'Group' },
+          { key: 'status', label: 'Status' },
+          { key: 'osVersion', label: 'OS Version' },
+          { key: 'firmware', label: 'Firmware' },
+          { key: 'lastCheckIn', label: 'Last Check-in' },
+          { key: 'userName', label: 'User' },
+          { key: 'compliance', label: 'Compliance' },
+        ], viewStates.mobicontrol.hidden);
+        renderMcViewsMenu();
+        renderMcTable();
+        document.getElementById('mc-views-dropdown').classList.add('hidden');
+      });
+    }
+
+    list.querySelectorAll('[data-mc-view-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const view = viewStates.mobicontrol.views.find((v) => String(v.id) === btn.dataset.mcViewId);
+        if (!view) return;
+        mc.el.filterSearch.value = view.config.search || '';
+        mc.el.filterPlatform.value = view.config.platform || '';
+        mc.el.filterStatus.value = view.config.status || '';
+        mc.el.filterCompliance.value = view.config.compliance || '';
+        mc.el.filterGroup.value = view.config.group || '';
+        viewStates.mobicontrol.hidden = new Set(view.config.hiddenCols || []);
+        mc.sort = { key: view.config.sortKey || null, dir: view.config.sortDir || 'asc' };
+        viewStates.mobicontrol.activeId = String(view.id);
+        renderColumnsDropdown('mobicontrol', [
+          { key: 'name', label: 'Name' },
+          { key: 'platform', label: 'Platform' },
+          { key: 'model', label: 'Model' },
+          { key: 'group', label: 'Group' },
+          { key: 'status', label: 'Status' },
+          { key: 'osVersion', label: 'OS Version' },
+          { key: 'firmware', label: 'Firmware' },
+          { key: 'lastCheckIn', label: 'Last Check-in' },
+          { key: 'userName', label: 'User' },
+          { key: 'compliance', label: 'Compliance' },
+        ], viewStates.mobicontrol.hidden);
+        updateMcSortHeaders();
+        renderMcViewsMenu();
+        renderMcTable();
+        document.getElementById('mc-views-dropdown').classList.add('hidden');
+      });
+    });
+
+    list.querySelectorAll('[data-mc-view-delete]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.mcViewDelete;
+        if (viewStates.mobicontrol.activeId === String(id)) viewStates.mobicontrol.activeId = null;
+        try {
+          await fetch(`/api/views/mobicontrol/${id}`, { method: 'DELETE' });
+          await loadViews('mobicontrol');
+          renderMcViewsMenu();
+        } catch (_) {}
+      });
+    });
+
+    // Add Save View button at the bottom
+    const divider = document.createElement('div');
+    divider.className = 'tab-dropdown-divider';
+    list.appendChild(divider);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'tab-dropdown-item';
+    saveBtn.textContent = '💾 Save Current View';
+    saveBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveView('mobicontrol', renderMcViewsMenu, () => ({
+        search: mc.el.filterSearch.value,
+        platform: mc.el.filterPlatform.value,
+        status: mc.el.filterStatus.value,
+        compliance: mc.el.filterCompliance.value,
+        group: mc.el.filterGroup.value,
+        sortKey: mc.sort.key,
+        sortDir: mc.sort.dir,
+        hiddenCols: [...viewStates.mobicontrol.hidden],
+      }));
+    });
+    list.appendChild(saveBtn);
   }
 
   function startMcCountdown() {
@@ -664,6 +1187,22 @@
       cb.addEventListener('click', (e) => e.stopPropagation());
       cb.addEventListener('change', () => toggleCompareDevice(cb.dataset.deviceId, cb.checked));
     });
+
+    // Apply column visibility
+    const mcColumns = [
+      { key: 'compare', label: 'Compare' },
+      { key: 'name', label: 'Name' },
+      { key: 'platform', label: 'Platform' },
+      { key: 'model', label: 'Model' },
+      { key: 'group', label: 'Group' },
+      { key: 'status', label: 'Status' },
+      { key: 'osVersion', label: 'OS Version' },
+      { key: 'firmware', label: 'Firmware' },
+      { key: 'lastCheckIn', label: 'Last Check-in' },
+      { key: 'userName', label: 'User' },
+      { key: 'compliance', label: 'Compliance' },
+    ];
+    applyColumnVisibility('mobicontrol', 'mc-table', mcColumns);
   }
 
   function toggleCompareDevice(deviceId, checked) {
@@ -688,7 +1227,85 @@
       mc.detailCache[deviceId] = { status: 'loading' };
       fetchMcDeviceDetail(deviceId);
     }
+    if (!mc.notesCache[deviceId]) {
+      mc.notesCache[deviceId] = { status: 'loading' };
+      fetchMcDeviceNotes(deviceId);
+    }
     renderMcTable();
+  }
+
+  // ─── Device notes (technician troubleshooting log, local to soti.api) ────────
+
+  const TECH_NAME_KEY = 'soti_tech_name';
+
+  function getTechName() {
+    let name = localStorage.getItem(TECH_NAME_KEY);
+    if (!name) {
+      name = (window.prompt('Enter your name (used to sign device notes):') || '').trim();
+      if (name) localStorage.setItem(TECH_NAME_KEY, name);
+    }
+    return name;
+  }
+
+  async function fetchMcDeviceNotes(deviceId) {
+    try {
+      const res  = await fetch(`/api/mc/devices/${encodeURIComponent(deviceId)}/notes`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      mc.notesCache[deviceId] = { status: 'loaded', notes: data.notes || [] };
+    } catch (e) {
+      mc.notesCache[deviceId] = { status: 'error', error: e.message };
+    }
+    if (mc.expandedId === deviceId) renderMcTable();
+  }
+
+  async function submitMcDeviceNote(deviceId, deviceName, noteText, btn) {
+    const technician = getTechName();
+    if (!technician) return;
+    if (!noteText || !noteText.trim()) return;
+    btn.disabled = true;
+    try {
+      const res  = await fetch(`/api/mc/devices/${encodeURIComponent(deviceId)}/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ technician, note: noteText.trim(), deviceName }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      mc.notesCache[deviceId] = { status: 'loaded', notes: data.notes || [] };
+      renderMcTable();
+    } catch (e) {
+      alert('Could not save note: ' + e.message);
+      btn.disabled = false;
+    }
+  }
+
+  function buildMcNotesSection(deviceId, deviceName) {
+    const entry = mc.notesCache[deviceId] || { status: 'loading' };
+    let listHtml;
+    if (entry.status === 'loading') {
+      listHtml = '<span class="cell-na">Loading notes&hellip;</span>';
+    } else if (entry.status === 'error') {
+      listHtml = `<span class="cell-na">Failed to load notes: ${esc(entry.error)}</span>`;
+    } else if (!entry.notes.length) {
+      listHtml = '<span class="cell-na">No notes yet for this device.</span>';
+    } else {
+      listHtml = `<ul class="device-notes-list">${entry.notes.map((n) => `
+        <li class="device-note">
+          <div class="device-note-meta"><strong>${esc(n.technician)}</strong> <span class="cell-na">${esc(fmtReportDate(n.created_at))}</span></div>
+          <div class="device-note-text">${esc(n.note)}</div>
+        </li>`).join('')}</ul>`;
+    }
+
+    return `
+      <h4>Notes</h4>
+      <div class="device-notes-section">
+        ${listHtml}
+        <div class="device-note-form">
+          <textarea class="device-note-input" placeholder="Add a note (e.g. pulled for battery replacement)&hellip;" rows="2"></textarea>
+          <button type="button" class="btn btn--sm device-note-add-btn">Add Note</button>
+        </div>
+      </div>`;
   }
 
   async function fetchMcDeviceDetail(deviceId) {
@@ -791,12 +1408,14 @@
     const tr = document.createElement('tr');
     tr.className = 'mc-detail-row';
     const entry = mc.detailCache[deviceId] || { status: 'loading' };
+    const device = mc.devices.find((d) => d.id === deviceId);
+    const deviceName = device ? device.name : '';
 
     let inner;
     if (entry.status === 'loading') {
-      inner = '<span class="cell-na">Loading device detail&hellip;</span>';
+      inner = `<span class="cell-na">Loading device detail&hellip;</span>${buildMcNotesSection(deviceId, deviceName)}`;
     } else if (entry.status === 'error') {
-      inner = `<span class="cell-na">Failed to load detail: ${esc(entry.error)}</span>`;
+      inner = `<span class="cell-na">Failed to load detail: ${esc(entry.error)}</span>${buildMcNotesSection(deviceId, deviceName)}`;
     } else {
       const detail = entry.data.detail || {};
       const mem    = detail.Memory || {};
@@ -841,12 +1460,22 @@
           ${securitySection}
           ${buildMcProfilesSection(entry.data.profiles)}
           ${attrsSection}
+          ${buildMcNotesSection(deviceId, deviceName)}
           <h4>All Fields</h4>
           <pre class="mcapp-schema">${highlightJson(detail)}</pre>
         </div>`;
     }
 
     tr.innerHTML = `<td colspan="11">${inner}</td>`;
+
+    const addBtn = tr.querySelector('.device-note-add-btn');
+    if (addBtn) {
+      addBtn.addEventListener('click', () => {
+        const textarea = tr.querySelector('.device-note-input');
+        submitMcDeviceNote(deviceId, deviceName, textarea.value, addBtn);
+      });
+    }
+
     return tr;
   }
 
@@ -1079,6 +1708,25 @@
     renderMcAppsColumnsMenu();
     document.getElementById('mcapps-save-view-btn').addEventListener('click', saveMcAppsView);
 
+    // CSV export for apps
+    const mcappsCsvBtn = document.getElementById('mcapps-csv-btn');
+    if (mcappsCsvBtn) {
+      mcappsCsvBtn.addEventListener('click', () => {
+        const headers = ['App Name', 'Platform', 'Version', 'Author', 'Package ID', 'Origin', 'Permissions', 'Status'];
+        const rows = mcApps.map((a) => [
+          a.AppName || '',
+          a.platform || '',
+          a.AppVersion || '',
+          a.AppAuthor || '',
+          a.AppPackageId || '',
+          a.AppOriginType || '',
+          (a._permsCount || 0),
+          a._active ? 'Active' : 'Inactive',
+        ]);
+        downloadCsvData('mobicontrol-apps.csv', headers, rows);
+      });
+    }
+
     document.querySelectorAll('#mcapps-table th[data-sort-mcapp]').forEach((th) => {
       th.addEventListener('click', () => {
         const key = th.dataset.sortMcapp;
@@ -1242,6 +1890,21 @@
         } catch (_) {}
       });
     });
+
+    // Add Save View button at the bottom
+    const divider = document.createElement('div');
+    divider.className = 'tab-dropdown-divider';
+    list.appendChild(divider);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'tab-dropdown-item';
+    saveBtn.textContent = '💾 Save Current View';
+    saveBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveMcAppsView();
+    });
+    list.appendChild(saveBtn);
   }
 
   async function saveMcAppsView() {
@@ -2217,11 +2880,55 @@
     sort:   { key: 'Name', dir: 'asc' },
   };
 
+  const profileColumns = [
+    { key: 'name', label: 'Name' },
+    { key: 'family', label: 'Family' },
+    { key: 'status', label: 'Status' },
+    { key: 'version', label: 'Version' },
+    { key: 'lastModified', label: 'Last Modified' },
+  ];
+
   function initProfilesList() {
     document.getElementById('profiles-list-search').addEventListener('input', renderProfilesList);
     document.getElementById('profiles-list-family-filter').addEventListener('change', renderProfilesList);
     document.getElementById('profiles-list-refresh').addEventListener('click', fetchProfilesList);
     document.getElementById('profiles-back-btn').addEventListener('click', showProfilesList);
+
+    // Column and view management for Profiles
+    renderColumnsDropdown('profiles', profileColumns, viewStates.profiles.hidden);
+
+    const profilesCsvBtn = document.getElementById('profiles-csv-btn');
+    if (profilesCsvBtn) {
+      profilesCsvBtn.addEventListener('click', () => {
+        const headers = ['Name', 'Family', 'Status', 'Version', 'Last Modified'];
+        const rows = profilesTab.all.map((p) => [
+          p.Name || '',
+          p.DeviceFamily || '',
+          p.Status || '',
+          p.ActiveVersionNumber || '',
+          p.LastModified || '',
+        ]);
+        downloadCsvData('mobicontrol-profiles.csv', headers, rows);
+      });
+    }
+
+    const profilesSaveViewBtn = document.getElementById('profiles-save-view-btn');
+    if (profilesSaveViewBtn) {
+      profilesSaveViewBtn.addEventListener('click', () => {
+        saveView('profiles', renderProfilesViewsMenu, () => ({
+          search: document.getElementById('profiles-list-search').value,
+          family: document.getElementById('profiles-list-family-filter').value,
+          sortKey: profilesTab.sort.key,
+          sortDir: profilesTab.sort.dir,
+          hiddenCols: [...viewStates.profiles.hidden],
+        }));
+      });
+    }
+
+    (async () => {
+      await loadViews('profiles');
+      renderProfilesViewsMenu();
+    })();
 
     document.querySelectorAll('#profiles-list-table th[data-sort-profiles]').forEach((th) => {
       th.addEventListener('click', () => {
@@ -2231,6 +2938,102 @@
         renderProfilesList();
       });
     });
+  }
+
+  function renderProfilesViewsMenu() {
+    const list = document.getElementById('profiles-views-list');
+    if (!list) return;
+
+    const activeView = viewStates.profiles.views.find((v) => String(v.id) === viewStates.profiles.activeId);
+    const btn = document.getElementById('profiles-views-btn');
+    if (btn) {
+      btn.innerHTML = activeView
+        ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;margin-right:4px;vertical-align:middle;"></span>View: ${esc(activeView.name)} <span class="tab-chevron">▾</span>`
+        : `Views <span class="tab-chevron">▾</span>`;
+    }
+
+    const defaultRow = `
+      <button type="button" class="tab-dropdown-item ${viewStates.profiles.activeId === null ? 'tab-dropdown-item--active' : ''}" data-profiles-view-default>
+        <span class="tab-dropdown-item-dot"></span>Default (all columns)
+      </button>`;
+
+    if (!viewStates.profiles.views.length) {
+      list.innerHTML = defaultRow + '<div class="tab-dropdown-empty">No saved views yet</div>';
+    } else {
+      list.innerHTML = defaultRow + viewStates.profiles.views.map((v) => `
+        <div class="tab-dropdown-view-row">
+          <button type="button" class="tab-dropdown-item ${viewStates.profiles.activeId === String(v.id) ? 'tab-dropdown-item--active' : ''}" data-profiles-view-id="${v.id}">
+            <span class="tab-dropdown-item-dot"></span>${esc(v.name)}
+          </button>
+          <button type="button" class="tab-dropdown-view-delete" data-profiles-view-delete="${v.id}" title="Delete view">✕</button>
+        </div>
+      `).join('');
+    }
+
+    const defaultBtn = list.querySelector('[data-profiles-view-default]');
+    if (defaultBtn) {
+      defaultBtn.addEventListener('click', () => {
+        document.getElementById('profiles-list-search').value = '';
+        document.getElementById('profiles-list-family-filter').value = '';
+        viewStates.profiles.hidden.clear();
+        profilesTab.sort = { key: null, dir: 'asc' };
+        viewStates.profiles.activeId = null;
+        renderColumnsDropdown('profiles', profileColumns, viewStates.profiles.hidden);
+        renderProfilesViewsMenu();
+        renderProfilesList();
+        document.getElementById('profiles-views-dropdown').classList.add('hidden');
+      });
+    }
+
+    list.querySelectorAll('[data-profiles-view-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const view = viewStates.profiles.views.find((v) => String(v.id) === btn.dataset.profilesViewId);
+        if (!view) return;
+        document.getElementById('profiles-list-search').value = view.config.search || '';
+        document.getElementById('profiles-list-family-filter').value = view.config.family || '';
+        viewStates.profiles.hidden = new Set(view.config.hiddenCols || []);
+        profilesTab.sort = { key: view.config.sortKey || null, dir: view.config.sortDir || 'asc' };
+        viewStates.profiles.activeId = String(view.id);
+        renderColumnsDropdown('profiles', profileColumns, viewStates.profiles.hidden);
+        renderProfilesViewsMenu();
+        renderProfilesList();
+        document.getElementById('profiles-views-dropdown').classList.add('hidden');
+      });
+    });
+
+    list.querySelectorAll('[data-profiles-view-delete]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.profilesViewDelete;
+        if (viewStates.profiles.activeId === String(id)) viewStates.profiles.activeId = null;
+        try {
+          await fetch(`/api/views/profiles/${id}`, { method: 'DELETE' });
+          await loadViews('profiles');
+          renderProfilesViewsMenu();
+        } catch (_) {}
+      });
+    });
+
+    // Add Save View button at the bottom
+    const divider = document.createElement('div');
+    divider.className = 'tab-dropdown-divider';
+    list.appendChild(divider);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'tab-dropdown-item';
+    saveBtn.textContent = '💾 Save Current View';
+    saveBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveView('profiles', renderProfilesViewsMenu, () => ({
+        search: document.getElementById('profiles-list-search').value,
+        family: document.getElementById('profiles-list-family-filter').value,
+        sortKey: profilesTab.sort.key,
+        sortDir: profilesTab.sort.dir,
+        hiddenCols: [...viewStates.profiles.hidden],
+      }));
+    });
+    list.appendChild(saveBtn);
   }
 
   function showProfilesList() {
@@ -2287,6 +3090,7 @@
   }
 
   function renderProfilesList() {
+    applyColumnVisibility('profiles', 'profiles-list-table', profileColumns);
     const tbody   = document.getElementById('profiles-list-table-body');
     const noRes   = document.getElementById('profiles-list-no-results');
     const term    = document.getElementById('profiles-list-search').value.trim().toLowerCase();
@@ -2472,11 +3276,55 @@
     currentPolicyId: null,
   };
 
+  const apppoliciesColumns = [
+    { key: 'name', label: 'Name' },
+    { key: 'family', label: 'Family' },
+    { key: 'apps', label: 'Apps' },
+    { key: 'status', label: 'Status' },
+    { key: 'lastModified', label: 'Last Modified' },
+  ];
+
   function initAppPoliciesList() {
     document.getElementById('apppolicies-list-search').addEventListener('input', renderAppPoliciesList);
     document.getElementById('apppolicies-list-family-filter').addEventListener('change', renderAppPoliciesList);
     document.getElementById('apppolicies-list-refresh').addEventListener('click', fetchAppPoliciesList);
     document.getElementById('apppolicies-back-btn').addEventListener('click', showAppPoliciesList);
+
+    // Column and view management for App Policies
+    renderColumnsDropdown('apppolicies', apppoliciesColumns, viewStates.apppolicies.hidden);
+
+    const apppoliciesCsvBtn = document.getElementById('apppolicies-csv-btn');
+    if (apppoliciesCsvBtn) {
+      apppoliciesCsvBtn.addEventListener('click', () => {
+        const headers = ['Name', 'Family', 'Apps', 'Status', 'Last Modified'];
+        const rows = appPoliciesTab.all.map((p) => [
+          p.Name || '',
+          p.Family || '',
+          p.AppsCount || p.Apps || '',
+          p.Status || '',
+          p.LastModified || '',
+        ]);
+        downloadCsvData('mobicontrol-apppolicies.csv', headers, rows);
+      });
+    }
+
+    const apppoliciesSaveViewBtn = document.getElementById('apppolicies-save-view-btn');
+    if (apppoliciesSaveViewBtn) {
+      apppoliciesSaveViewBtn.addEventListener('click', () => {
+        saveView('apppolicies', renderAppPoliciesViewsMenu, () => ({
+          search: document.getElementById('apppolicies-list-search').value,
+          family: document.getElementById('apppolicies-list-family-filter').value,
+          sortKey: appPoliciesTab.sort.key,
+          sortDir: appPoliciesTab.sort.dir,
+          hiddenCols: [...viewStates.apppolicies.hidden],
+        }));
+      });
+    }
+
+    (async () => {
+      await loadViews('apppolicies');
+      renderAppPoliciesViewsMenu();
+    })();
 
     document.querySelectorAll('#apppolicies-list-table th[data-sort-apppolicies]').forEach((th) => {
       th.addEventListener('click', () => {
@@ -2486,6 +3334,102 @@
         renderAppPoliciesList();
       });
     });
+  }
+
+  function renderAppPoliciesViewsMenu() {
+    const list = document.getElementById('apppolicies-views-list');
+    if (!list) return;
+
+    const activeView = viewStates.apppolicies.views.find((v) => String(v.id) === viewStates.apppolicies.activeId);
+    const btn = document.getElementById('apppolicies-views-btn');
+    if (btn) {
+      btn.innerHTML = activeView
+        ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;margin-right:4px;vertical-align:middle;"></span>View: ${esc(activeView.name)} <span class="tab-chevron">▾</span>`
+        : `Views <span class="tab-chevron">▾</span>`;
+    }
+
+    const defaultRow = `
+      <button type="button" class="tab-dropdown-item ${viewStates.apppolicies.activeId === null ? 'tab-dropdown-item--active' : ''}" data-apppolicies-view-default>
+        <span class="tab-dropdown-item-dot"></span>Default (all columns)
+      </button>`;
+
+    if (!viewStates.apppolicies.views.length) {
+      list.innerHTML = defaultRow + '<div class="tab-dropdown-empty">No saved views yet</div>';
+    } else {
+      list.innerHTML = defaultRow + viewStates.apppolicies.views.map((v) => `
+        <div class="tab-dropdown-view-row">
+          <button type="button" class="tab-dropdown-item ${viewStates.apppolicies.activeId === String(v.id) ? 'tab-dropdown-item--active' : ''}" data-apppolicies-view-id="${v.id}">
+            <span class="tab-dropdown-item-dot"></span>${esc(v.name)}
+          </button>
+          <button type="button" class="tab-dropdown-view-delete" data-apppolicies-view-delete="${v.id}" title="Delete view">✕</button>
+        </div>
+      `).join('');
+    }
+
+    const defaultBtn = list.querySelector('[data-apppolicies-view-default]');
+    if (defaultBtn) {
+      defaultBtn.addEventListener('click', () => {
+        document.getElementById('apppolicies-list-search').value = '';
+        document.getElementById('apppolicies-list-family-filter').value = '';
+        viewStates.apppolicies.hidden.clear();
+        appPoliciesTab.sort = { key: null, dir: 'asc' };
+        viewStates.apppolicies.activeId = null;
+        renderColumnsDropdown('apppolicies', apppoliciesColumns, viewStates.apppolicies.hidden);
+        renderAppPoliciesViewsMenu();
+        renderAppPoliciesList();
+        document.getElementById('apppolicies-views-dropdown').classList.add('hidden');
+      });
+    }
+
+    list.querySelectorAll('[data-apppolicies-view-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const view = viewStates.apppolicies.views.find((v) => String(v.id) === btn.dataset.apppoliciesViewId);
+        if (!view) return;
+        document.getElementById('apppolicies-list-search').value = view.config.search || '';
+        document.getElementById('apppolicies-list-family-filter').value = view.config.family || '';
+        viewStates.apppolicies.hidden = new Set(view.config.hiddenCols || []);
+        appPoliciesTab.sort = { key: view.config.sortKey || null, dir: view.config.sortDir || 'asc' };
+        viewStates.apppolicies.activeId = String(view.id);
+        renderColumnsDropdown('apppolicies', apppoliciesColumns, viewStates.apppolicies.hidden);
+        renderAppPoliciesViewsMenu();
+        renderAppPoliciesList();
+        document.getElementById('apppolicies-views-dropdown').classList.add('hidden');
+      });
+    });
+
+    list.querySelectorAll('[data-apppolicies-view-delete]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.apppoliciesViewDelete;
+        if (viewStates.apppolicies.activeId === String(id)) viewStates.apppolicies.activeId = null;
+        try {
+          await fetch(`/api/views/apppolicies/${id}`, { method: 'DELETE' });
+          await loadViews('apppolicies');
+          renderAppPoliciesViewsMenu();
+        } catch (_) {}
+      });
+    });
+
+    // Add Save View button at the bottom
+    const divider = document.createElement('div');
+    divider.className = 'tab-dropdown-divider';
+    list.appendChild(divider);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'tab-dropdown-item';
+    saveBtn.textContent = '💾 Save Current View';
+    saveBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveView('apppolicies', renderAppPoliciesViewsMenu, () => ({
+        search: document.getElementById('apppolicies-list-search').value,
+        family: document.getElementById('apppolicies-list-family-filter').value,
+        sortKey: appPoliciesTab.sort.key,
+        sortDir: appPoliciesTab.sort.dir,
+        hiddenCols: [...viewStates.apppolicies.hidden],
+      }));
+    });
+    list.appendChild(saveBtn);
   }
 
   function showAppPoliciesList() {
@@ -2539,6 +3483,7 @@
   }
 
   function renderAppPoliciesList() {
+    applyColumnVisibility('apppolicies', 'apppolicies-list-table', apppoliciesColumns);
     const tbody  = document.getElementById('apppolicies-list-table-body');
     const noRes  = document.getElementById('apppolicies-list-no-results');
     const term   = document.getElementById('apppolicies-list-search').value.trim().toLowerCase();
@@ -3082,7 +4027,142 @@
     e.autoChk.addEventListener('change', portalsUpdateSettings);
     e.intervalSel.addEventListener('change', portalsUpdateSettings);
 
+    // Column and view management for Portals
+    const portalColumns = [
+      { key: 'id', label: '#' },
+      { key: 'location', label: 'Location' },
+      { key: 'name', label: 'Portal' },
+      { key: 'url', label: 'URL' },
+      { key: 'status', label: 'Status' },
+      { key: 'http', label: 'HTTP' },
+      { key: 'responseTime', label: 'Response Time' },
+      { key: 'lastChecked', label: 'Last Checked' },
+      { key: 'history', label: 'History' },
+    ];
+    renderColumnsDropdown('portals', portalColumns, viewStates.portals.hidden);
+
+    const portalCsvBtn = document.getElementById('portal-csv-btn');
+    if (portalCsvBtn) {
+      portalCsvBtn.addEventListener('click', () => {
+        const headers = ['#', 'Location', 'Portal', 'URL', 'Status', 'HTTP', 'Response Time', 'Last Checked'];
+        const rows = portalsTab.portals.map((p, idx) => [
+          idx + 1,
+          p.location || '',
+          p.name || '',
+          p.url || '',
+          p.status || '',
+          p.httpCode || '',
+          p.responseTime ? `${p.responseTime}ms` : '',
+          p.checkedAt ? new Date(p.checkedAt).toLocaleString() : '',
+        ]);
+        downloadCsvData('portals.csv', headers, rows);
+      });
+    }
+
+    const portalSaveViewBtn = document.getElementById('portal-save-view-btn');
+    if (portalSaveViewBtn) {
+      portalSaveViewBtn.addEventListener('click', () => {
+        saveView('portals', renderPortalViewsMenu, () => ({
+          hiddenCols: [...viewStates.portals.hidden],
+        }));
+      });
+    }
+
+    (async () => {
+      await loadViews('portals');
+      renderPortalViewsMenu();
+    })();
+
     startPortalsPoll();
+  }
+
+  function renderPortalViewsMenu() {
+    const list = document.getElementById('portal-views-list');
+    if (!list) return;
+
+    const activeView = viewStates.portals.views.find((v) => String(v.id) === viewStates.portals.activeId);
+    const btn = document.getElementById('portal-views-btn');
+    if (btn) {
+      btn.innerHTML = activeView
+        ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;margin-right:4px;vertical-align:middle;"></span>View: ${esc(activeView.name)} <span class="tab-chevron">▾</span>`
+        : `Views <span class="tab-chevron">▾</span>`;
+    }
+
+    const defaultRow = `
+      <button type="button" class="tab-dropdown-item ${viewStates.portals.activeId === null ? 'tab-dropdown-item--active' : ''}" data-portal-view-default>
+        <span class="tab-dropdown-item-dot"></span>Default (all columns)
+      </button>`;
+
+    if (!viewStates.portals.views.length) {
+      list.innerHTML = defaultRow + '<div class="tab-dropdown-empty">No saved views yet</div>';
+    } else {
+      list.innerHTML = defaultRow + viewStates.portals.views.map((v) => `
+        <div class="tab-dropdown-view-row">
+          <button type="button" class="tab-dropdown-item ${viewStates.portals.activeId === String(v.id) ? 'tab-dropdown-item--active' : ''}" data-portal-view-id="${v.id}">
+            <span class="tab-dropdown-item-dot"></span>${esc(v.name)}
+          </button>
+          <button type="button" class="tab-dropdown-view-delete" data-portal-view-delete="${v.id}" title="Delete view">✕</button>
+        </div>
+      `).join('');
+    }
+
+    const defaultBtn = list.querySelector('[data-portal-view-default]');
+    if (defaultBtn) {
+      defaultBtn.addEventListener('click', () => {
+        viewStates.portals.hidden.clear();
+        viewStates.portals.activeId = null;
+        renderColumnsDropdown('portals', [
+          { key: 'id', label: '#' },
+          { key: 'location', label: 'Location' },
+          { key: 'name', label: 'Portal' },
+          { key: 'url', label: 'URL' },
+          { key: 'status', label: 'Status' },
+          { key: 'http', label: 'HTTP' },
+          { key: 'responseTime', label: 'Response Time' },
+          { key: 'lastChecked', label: 'Last Checked' },
+          { key: 'history', label: 'History' },
+        ], viewStates.portals.hidden);
+        renderPortalViewsMenu();
+        renderPortalsTable(portalsTab.portals);
+        document.getElementById('portal-views-dropdown').classList.add('hidden');
+      });
+    }
+
+    list.querySelectorAll('[data-portal-view-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const view = viewStates.portals.views.find((v) => String(v.id) === btn.dataset.portalViewId);
+        if (!view) return;
+        viewStates.portals.hidden = new Set(view.config.hiddenCols || []);
+        viewStates.portals.activeId = String(view.id);
+        renderColumnsDropdown('portals', [
+          { key: 'id', label: '#' },
+          { key: 'location', label: 'Location' },
+          { key: 'name', label: 'Portal' },
+          { key: 'url', label: 'URL' },
+          { key: 'status', label: 'Status' },
+          { key: 'http', label: 'HTTP' },
+          { key: 'responseTime', label: 'Response Time' },
+          { key: 'lastChecked', label: 'Last Checked' },
+          { key: 'history', label: 'History' },
+        ], viewStates.portals.hidden);
+        renderPortalViewsMenu();
+        renderPortalsTable(portalsTab.portals);
+        document.getElementById('portal-views-dropdown').classList.add('hidden');
+      });
+    });
+
+    list.querySelectorAll('[data-portal-view-delete]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.portalViewDelete;
+        if (viewStates.portals.activeId === String(id)) viewStates.portals.activeId = null;
+        try {
+          await fetch(`/api/views/portals/${id}`, { method: 'DELETE' });
+          await loadViews('portals');
+          renderPortalViewsMenu();
+        } catch (_) {}
+      });
+    });
   }
 
   function startPortalsPoll() {
@@ -3173,6 +4253,21 @@
     });
     tbody.innerHTML = '';
     tbody.appendChild(frag);
+
+    // Apply column visibility
+    const portalColumns = [
+      { key: 'id', label: '#' },
+      { key: 'location', label: 'Location' },
+      { key: 'name', label: 'Portal' },
+      { key: 'url', label: 'URL' },
+      { key: 'status', label: 'Status' },
+      { key: 'http', label: 'HTTP' },
+      { key: 'responseTime', label: 'Response Time' },
+      { key: 'lastChecked', label: 'Last Checked' },
+      { key: 'history', label: 'History' },
+      { key: 'actions', label: 'Actions' },
+    ];
+    applyColumnVisibility('portals', 'portal-table', portalColumns);
   }
 
   function buildPortalStatusBadge(p) {
@@ -3255,6 +4350,876 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  //   Reporting
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Device fields available to any report (built-in or user-created) — used both
+  // for the built-in Offline Duration columns and the "New Report" column picker.
+  const DEVICE_FIELDS = [
+    { key: 'name', label: 'Name' },
+    { key: 'serial', label: 'Serial' },
+    { key: 'group', label: 'Group' },
+    { key: 'enrollmentTime', label: 'Enrolled', kind: 'date' },
+    { key: 'lastCheckIn', label: 'Last Check-in', kind: 'date' },
+    { key: 'offlineDurationMs', label: 'Offline For', kind: 'duration' },
+    { key: 'isDuplicateSerial', label: 'Duplicate?', kind: 'bool' },
+    { key: 'isOnline', label: 'Online?', kind: 'bool' },
+    { key: 'compliance', label: 'Compliance' },
+    { key: 'missingProfiles', label: 'Missing Profiles', kind: 'namelist' },
+    { key: 'missingAppPolicies', label: 'Missing App Policies', kind: 'namelist' },
+    { key: 'isStale', label: 'Stale', kind: 'bool' },
+    { key: 'fetchError', label: 'Fetch Error' },
+  ];
+
+  function deviceField(key) {
+    return DEVICE_FIELDS.find((f) => f.key === key) || { key, label: key };
+  }
+
+  // Built-in report profiles. User-created reports (loaded from
+  // /api/custom-reports) are appended after them — each gets its own profile
+  // in the sidebar and its own independent state below.
+  const BUILTIN_PROFILES = [
+    {
+      id: 'offline-duration',
+      name: 'Offline Duration',
+      builtin: true,
+      endpoint: '/api/reports/offline-duration',
+      hint: 'Devices currently offline, sorted longest-offline first. Use this to find devices to reclaim or decommission.',
+      columns: ['name', 'serial', 'group', 'enrollmentTime', 'lastCheckIn', 'offlineDurationMs', 'isDuplicateSerial'].map(deviceField),
+    },
+    {
+      id: 'device-audit',
+      name: 'Profile & Policy Coverage',
+      builtin: true,
+      endpoint: '/api/reports/device-audit',
+      hint: 'How well each profile and app policy is applied across eligible devices, based on real group targeting rules.',
+      columns: ['name', 'group', 'lastCheckIn', 'missingProfiles', 'missingAppPolicies', 'isStale', 'fetchError'].map(deviceField),
+    },
+  ];
+
+  let customReports = [];
+
+  function reportProfiles() {
+    return [...BUILTIN_PROFILES, ...customReports.map((r) => ({
+      id: `custom-${r.id}`,
+      dbId: r.id,
+      name: r.name,
+      builtin: false,
+      endpoint: `/api/custom-reports/${r.id}/data`,
+      hint: 'Custom report.',
+      columns: (r.config.columns && r.config.columns.length ? r.config.columns : ['name']).map(deviceField),
+    }))];
+  }
+
+  function findProfile(id) {
+    return reportProfiles().find((p) => p.id === id);
+  }
+
+  let activeReportId = 'offline-duration';
+
+  // Per-profile state — switching profiles never resets another profile's
+  // sort/filter/column/view configuration, since each has its own entry here.
+  const reportState = new Map();
+
+  function activeState() {
+    if (!reportState.has(activeReportId)) {
+      reportState.set(activeReportId, {
+        loaded: false,
+        devices: [],
+        groupGaps: [],
+        sortKey: activeReportId === 'offline-duration' ? 'offlineDurationMs' : 'name',
+        sortDir: 'desc',
+        lastUpdatedText: '',
+        minDays: 0,
+        hidden: new Set(),
+        views: [],
+        activeId: null,
+        coverage: [],
+        coverageView: false,
+        totalDevices: 0,
+      });
+    }
+    return reportState.get(activeReportId);
+  }
+
+  // Saved views/columns are scoped per report profile so they don't leak between report types.
+  function reportViewScope() {
+    return `report-${activeReportId}`;
+  }
+
+  function reportColumns() {
+    const profile = findProfile(activeReportId);
+    return profile ? profile.columns : [];
+  }
+
+  function filterReportDevices(devices) {
+    const state = activeState();
+    if (activeReportId !== 'offline-duration' || state.minDays <= 0) return devices;
+    const minMs = state.minDays * 86400000;
+    return devices.filter((d) => d.offlineDurationMs != null && d.offlineDurationMs >= minMs);
+  }
+
+  function fmtReportDate(iso) {
+    if (!iso) return 'Unknown';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? 'Unknown' : d.toLocaleString();
+  }
+
+  function reportCellHtml(col, d) {
+    switch (col.kind) {
+      case 'date':     return esc(fmtReportDate(d[col.key]));
+      case 'duration':  return esc(d.offlineDurationLabel || '—');
+      case 'bool':      return col.key === 'isDuplicateSerial'
+        ? (d.isDuplicateSerial ? '<span class="badge badge--compliance-fail">Duplicate</span>' : '')
+        : (d[col.key] ? 'Yes' : 'No');
+      case 'namelist': {
+        const names = d[col.key];
+        if (!Array.isArray(names) || !names.length) return '—';
+        return names.map((n) => `<span class="badge badge--compliance-fail">${esc(n)}</span>`).join(' ');
+      }
+      default:          return esc(d[col.key]) || '—';
+    }
+  }
+
+  function reportCellPlain(col, d) {
+    switch (col.kind) {
+      case 'date':      return fmtReportDate(d[col.key]);
+      case 'duration':  return d.offlineDurationLabel || '';
+      case 'bool':      return d[col.key] ? 'Yes' : 'No';
+      case 'namelist':  return Array.isArray(d[col.key]) ? d[col.key].join('; ') : '';
+      default:          return d[col.key] ?? '';
+    }
+  }
+
+  function sortReportDevices(devices) {
+    const { sortKey, sortDir } = activeState();
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return [...devices].sort((a, b) => {
+      const av = a[sortKey];
+      const bv = b[sortKey];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+      return String(av).localeCompare(String(bv)) * dir;
+    });
+  }
+
+  function renderReportTableHead() {
+    const head = document.getElementById('report-table-head');
+    if (!head) return;
+    head.innerHTML = `<tr>${reportColumns().map((col) => `
+      <th data-sort-report="${col.key}">${esc(col.label)} <span class="sort-icon">↕</span></th>
+    `).join('')}</tr>`;
+    head.querySelectorAll('th[data-sort-report]').forEach((th) => {
+      th.addEventListener('click', () => {
+        const key = th.dataset.sortReport;
+        const state = activeState();
+        if (state.sortKey === key) {
+          state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          state.sortKey = key;
+          state.sortDir = 'desc';
+        }
+        renderReportTable();
+      });
+    });
+  }
+
+  function renderReportTable() {
+    const table    = document.getElementById('report-table');
+    const body     = document.getElementById('report-table-body');
+    const noResult = document.getElementById('report-no-results');
+    const rowCount = document.getElementById('report-row-count');
+    const state    = activeState();
+    const cols     = reportColumns();
+    const sorted   = sortReportDevices(filterReportDevices(state.devices));
+
+    if (sorted.length === 0) {
+      noResult.classList.remove('hidden');
+      table.style.display = 'none';
+    } else {
+      noResult.classList.add('hidden');
+      table.style.display = '';
+    }
+    rowCount.textContent = state.minDays > 0
+      ? `Showing ${sorted.length} of ${state.devices.length} offline devices (offline ${state.minDays}+ day${state.minDays === 1 ? '' : 's'})`
+      : `Showing ${sorted.length} device${sorted.length === 1 ? '' : 's'}`;
+
+    body.innerHTML = sorted.map((d) => `
+      <tr>${cols.map((col) => `<td>${reportCellHtml(col, d)}</td>`).join('')}</tr>
+    `).join('');
+  }
+
+  // Rolls flagged devices up by Group so a systemic gap (e.g. a whole group
+  // missing one policy) is visible as one line instead of N separate device rows.
+  function renderGroupGaps() {
+    const el = document.getElementById('report-group-gaps');
+    if (!el) return;
+    const gaps = (activeState().groupGaps || []).slice(0, 20);
+    if (activeReportId !== 'device-audit' || !gaps.length) {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      return;
+    }
+    el.classList.remove('hidden');
+    el.innerHTML = `
+      <div style="font-weight:600;margin-bottom:6px;">Gaps by Group</div>
+      <div style="display:flex;flex-direction:column;gap:4px;">
+        ${gaps.map((g) => {
+          const pct = g.totalInGroup ? Math.round((g.missingCount / g.totalInGroup) * 100) : 0;
+          return `<div style="display:flex;align-items:center;gap:8px;">
+            <span class="badge badge--compliance-fail">${esc(g.kind)}</span>
+            <strong>${esc(g.name)}</strong>
+            <span style="color:var(--text-muted,#888);">missing on ${g.missingCount}/${g.totalInGroup} (${pct}%) in <em>${esc(g.group)}</em></span>
+          </div>`;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  async function fetchReport(id) {
+    const profile = findProfile(id);
+    if (!profile) return;
+    const body = document.getElementById('report-table-body');
+    body.innerHTML = `<tr class="table-placeholder"><td colspan="${reportColumns().length}">Loading report&hellip;</td></tr>`;
+    try {
+      const res  = await fetch(profile.endpoint);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      const state = activeState();
+      state.devices = data.devices || [];
+      state.groupGaps = data.groupGaps || [];
+      state.coverage = data.coverage || [];
+      state.totalDevices = data.totalDevices || 0;
+      state.loaded  = true;
+      state.lastUpdatedText = new Date().toLocaleTimeString();
+      renderReportTable();
+      renderGroupGaps();
+      renderCoverageTable();
+      if (activeTab === 'reporting') elLastUpdated.textContent = state.lastUpdatedText;
+    } catch (e) {
+      body.innerHTML = `<tr class="table-placeholder"><td colspan="${reportColumns().length}">Error: ${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  function loadReportIfNeeded() {
+    if (activeState().loaded) return;
+    fetchReport(activeReportId);
+  }
+
+  // Profile & Policy Coverage always shows the Coverage view; every other
+  // report profile (Offline Duration, custom reports) shows the plain device
+  // table. There's no user-facing toggle — it's determined by the profile.
+  function updateReportViewToggle() {
+    const isDeviceAudit = activeReportId === 'device-audit';
+    document.getElementById('report-devices-view').classList.toggle('hidden', isDeviceAudit);
+    document.getElementById('report-coverage-view').classList.toggle('hidden', !isDeviceAudit);
+    const csvBtn = document.getElementById('report-csv-btn');
+    csvBtn.title = isDeviceAudit ? 'Export coverage to CSV' : 'Export to CSV';
+    csvBtn.textContent = isDeviceAudit ? '📥 Export Coverage CSV' : '📥 Export CSV';
+    if (isDeviceAudit) renderCoverageTable();
+  }
+
+  // Coverage rows track their own expand state per report profile so re-renders
+  // (e.g. after a refresh) don't collapse whatever the user had open.
+  function coverageExpandedSet() {
+    const state = activeState();
+    if (!state.coverageExpanded) state.coverageExpanded = new Set();
+    return state.coverageExpanded;
+  }
+
+  // Tracks which out-of-scope group rows have their "has it anyway" device
+  // list expanded, keyed separately from coverageExpandedSet() since a
+  // profile's excluded-group rows nest inside its own expand state.
+  function coverageExcludedExpandedSet() {
+    const state = activeState();
+    if (!state.coverageExcludedExpanded) state.coverageExcludedExpanded = new Set();
+    return state.coverageExcludedExpanded;
+  }
+
+  // Tracks which in-scope group rows have their "has it assigned" device
+  // list expanded — separate from coverageExcludedExpandedSet() (that one's
+  // for out-of-scope group rows).
+  function coverageActualExpandedSet() {
+    const state = activeState();
+    if (!state.coverageActualExpanded) state.coverageActualExpanded = new Set();
+    return state.coverageActualExpanded;
+  }
+
+  // Renders a device-name list as a wrapping grid of small tags instead of
+  // one long comma-separated string — the latter is unreadable once a group
+  // has more than a handful of devices.
+  function deviceTags(devices) {
+    if (!devices || !devices.length) return '—';
+    return `<div class="device-tag-list">${devices.map((d) => `<span class="device-tag">${esc(d)}</span>`).join('')}</div>`;
+  }
+
+  function renderCoverageTable() {
+    const body = document.getElementById('report-coverage-table-body');
+    const noResult = document.getElementById('report-coverage-no-results');
+    const table = document.getElementById('report-coverage-table');
+    if (!body) return;
+    const coverage = [...(activeState().coverage || [])].sort((a, b) => b.totalMissing - a.totalMissing || (b.globalPct ?? -1) - (a.globalPct ?? -1));
+    const expanded = coverageExpandedSet();
+    const excludedExpanded = coverageExcludedExpandedSet();
+    const actualExpanded = coverageActualExpandedSet();
+
+    if (coverage.length === 0) {
+      noResult.classList.remove('hidden');
+      table.style.display = 'none';
+      body.innerHTML = '';
+      return;
+    }
+    noResult.classList.add('hidden');
+    table.style.display = '';
+
+    body.innerHTML = coverage.map((c) => {
+      const key = `${c.kind}||${c.name}`;
+      const isOpen = expanded.has(key);
+      const missingCell = c.isDriftUntargeted
+        ? '<span class="badge badge--compliance-fail">Never targeted</span>'
+        : (c.totalMissing > 0
+          ? `<span class="badge badge--compliance-fail">${c.totalMissing}</span>`
+          : '<span class="badge badge--compliance-ok">0</span>');
+
+      // Groups arrive sorted group-first (see server.js), so consecutive rows
+      // sharing a group are shown as one visual block: the group name prints
+      // once and each row underneath shows just its distinct model.
+      let lastDetailGroup = null;
+      const detailRows = c.groups.map((g) => {
+        const actKey = `${key}||${g.group}||${g.model}`;
+        const actOpen = actualExpanded.has(actKey);
+        const actualRow = g.actualCount
+          ? `<tr class="coverage-detail-row ${actOpen ? '' : 'hidden'}" data-actual-detail="${esc(actKey)}">
+              <td></td>
+              <td colspan="6"><strong>Has it assigned:</strong>${deviceTags(g.actualDevices)}</td>
+            </tr>`
+          : '';
+        const showGroup = g.group !== lastDetailGroup;
+        lastDetailGroup = g.group;
+        return `<tr>
+          <td>${g.actualCount ? `<button type="button" class="coverage-expand-btn" data-actual-toggle="${esc(actKey)}" aria-expanded="${actOpen}">${actOpen ? '▾' : '▸'}</button>` : ''}</td>
+          <td>${showGroup ? esc(g.group) : ''}</td>
+          <td>${esc(g.model)}</td>
+          <td>${g.actualCount}/${g.expectedCount || g.actualCount}</td>
+          <td>${g.missingCount > 0 ? `<span class="badge badge--compliance-fail">${g.missingCount}</span>` : '0'}</td>
+          <td>${deviceTags(g.missingDevices)}</td>
+          <td>${deviceTags(g.extraDevices)}</td>
+        </tr>
+        ${actualRow}`;
+      }).join('');
+
+      let lastExcludedGroup = null;
+      const excludedRows = (c.excludedGroups || []).map((g) => {
+        const exKey = `${key}||${g.group}||${g.model}`;
+        const exOpen = excludedExpanded.has(exKey);
+        const hasItRow = g.extraCount
+          ? `<tr class="coverage-detail-row ${exOpen ? '' : 'hidden'}" data-excluded-detail="${esc(exKey)}">
+              <td></td>
+              <td colspan="3"><strong>Has it despite being out of scope:</strong>${deviceTags(g.extraDevices)}</td>
+            </tr>`
+          : '';
+        const showGroup = g.group !== lastExcludedGroup;
+        lastExcludedGroup = g.group;
+        return `<tr>
+            <td>${g.extraCount ? `<button type="button" class="coverage-expand-btn" data-excluded-toggle="${esc(exKey)}" aria-expanded="${exOpen}">${exOpen ? '▾' : '▸'}</button>` : ''}</td>
+            <td>${showGroup ? esc(g.group) : ''}</td>
+            <td>${esc(g.model)}</td>
+            <td>${g.count}</td>
+            <td>${g.extraCount ? `<span class="badge badge--compliance-fail">${g.extraCount}</span>` : '—'}</td>
+          </tr>
+          ${hasItRow}`;
+      }).join('');
+      const excludedNote = c.totalExcluded > 0 || c.excludedGroups.length
+        ? `<details class="coverage-note">
+            <summary>Out of scope (${c.totalExcluded} across ${c.excludedGroups.length} group${c.excludedGroups.length === 1 ? '' : 's'})</summary>
+            <div class="coverage-note-body">
+              <table class="printer-table coverage-group-detail">
+                <thead><tr><th></th><th>Group</th><th>Model</th><th>Out of Scope</th><th>Has It Anyway</th></tr></thead>
+                <tbody>${excludedRows}</tbody>
+              </table>
+            </div>
+          </details>`
+        : '';
+      const extraNote = c.totalExtra > 0
+        ? `<p class="coverage-note-inline">Applied outside expected scope (${c.totalExtra}) — installed on devices MobiControl's targeting rule doesn't currently reach; not counted as a gap.</p>`
+        : '';
+
+      return `<tr class="coverage-row" data-coverage-key="${esc(key)}">
+        <td><button type="button" class="coverage-expand-btn" data-coverage-toggle="${esc(key)}" aria-expanded="${isOpen}">${isOpen ? '▾' : '▸'}</button></td>
+        <td>${esc(c.name)}</td>
+        <td>${esc(c.kind)}</td>
+        <td><span class="badge badge--platform-other">${esc(c.scope)}</span></td>
+        <td>${c.totalActual}/${c.totalExpected} (${esc(c.scope)})</td>
+        <td>${c.totalExpected}</td>
+        <td>${missingCell}</td>
+        <td>${c.globalPct === null ? '—' : `${c.globalPct}%`}</td>
+      </tr>
+      <tr class="coverage-detail-row ${isOpen ? '' : 'hidden'}" data-coverage-detail="${esc(key)}">
+        <td></td>
+        <td colspan="7">
+          ${excludedNote}
+          ${extraNote}
+          ${c.groups.length ? `<table class="printer-table coverage-group-detail">
+            <thead><tr><th></th><th>Group</th><th>Model</th><th>Has It / Expected</th><th>Missing</th><th>Missing Devices</th><th>Extra (Out of Scope)</th></tr></thead>
+            <tbody>${detailRows}</tbody>
+          </table>` : '<em>No devices in scope for this item.</em>'}
+        </td>
+      </tr>`;
+    }).join('');
+
+    body.querySelectorAll('[data-actual-toggle]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const actKey = btn.dataset.actualToggle;
+        if (actualExpanded.has(actKey)) actualExpanded.delete(actKey); else actualExpanded.add(actKey);
+        renderCoverageTable();
+      });
+    });
+    body.querySelectorAll('[data-excluded-toggle]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const exKey = btn.dataset.excludedToggle;
+        if (excludedExpanded.has(exKey)) excludedExpanded.delete(exKey); else excludedExpanded.add(exKey);
+        renderCoverageTable();
+      });
+    });
+    body.querySelectorAll('[data-coverage-toggle]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.coverageToggle;
+        if (expanded.has(key)) expanded.delete(key); else expanded.add(key);
+        renderCoverageTable();
+      });
+    });
+  }
+
+  function exportCoverageCsv() {
+    const coverage = [...(activeState().coverage || [])].sort((a, b) => b.totalMissing - a.totalMissing || (b.globalPct ?? -1) - (a.globalPct ?? -1));
+    const headers = ['Name', 'Kind', 'Scope', 'Group', 'Model', 'Has It', 'Expected Here', 'Missing', 'Missing Devices', 'Extra (Out of Scope)', 'Extra Devices', '% of Expected', 'Config Drift', 'Excluded Count', 'Excluded Devices'];
+    const rows = [];
+    coverage.forEach((c) => {
+      const pct = c.globalPct === null ? '' : c.globalPct;
+      const excludedCount = c.totalExcluded || 0;
+      const excludedDevices = (c.excludedGroups || []).flatMap((g) => g.devices).join('; ');
+      if (!c.groups.length) {
+        rows.push([c.name, c.kind, c.scope, '', '', 0, 0, 0, '', 0, '', pct, c.isDriftUntargeted ? 'Yes' : 'No', excludedCount, excludedDevices]);
+        return;
+      }
+      c.groups.forEach((g) => {
+        rows.push([c.name, c.kind, c.scope, g.group, g.model, g.actualCount, g.expectedCount, g.missingCount, g.missingDevices.join('; '), g.extraCount || 0, (g.extraDevices || []).join('; '), pct, c.isDriftUntargeted ? 'Yes' : 'No', excludedCount, excludedDevices]);
+      });
+    });
+    downloadCsvData('device-audit-coverage.csv', headers, rows);
+  }
+
+  function renderReportColumnsList() {
+    const list = document.getElementById('report-columns-list');
+    if (!list) return;
+    const state = activeState();
+    list.innerHTML = reportColumns().map((col) => {
+      const isHidden = state.hidden.has(col.key);
+      return `
+        <label class="tab-dropdown-item" style="display:flex;align-items:center;gap:8px;padding:4px 8px;">
+          <input type="checkbox" class="col-toggle" data-col="${col.key}" ${!isHidden ? 'checked' : ''} style="cursor:pointer;" />
+          <span style="cursor:pointer;flex:1;">${col.label}</span>
+        </label>
+      `;
+    }).join('');
+    list.querySelectorAll('.col-toggle').forEach((cb) => {
+      cb.addEventListener('change', () => {
+        if (cb.checked) state.hidden.delete(cb.dataset.col);
+        else state.hidden.add(cb.dataset.col);
+        applyReportColumnVisibility();
+      });
+    });
+  }
+
+  function applyReportColumnVisibility() {
+    const style = document.getElementById('report-col-visibility');
+    if (style) style.remove();
+    const state = activeState();
+    const cols = reportColumns();
+    const rules = cols
+      .map((col, idx) => {
+        if (!state.hidden.has(col.key)) return null;
+        return `#report-table thead th:nth-child(${idx + 1}), #report-table tbody td:nth-child(${idx + 1}) { display: none; }`;
+      })
+      .filter(Boolean)
+      .join('\n');
+    if (!rules) return;
+    const newStyle = document.createElement('style');
+    newStyle.id = 'report-col-visibility';
+    newStyle.textContent = rules;
+    document.head.appendChild(newStyle);
+  }
+
+  async function loadReportViews() {
+    const state = activeState();
+    try {
+      const res = await fetch(`/api/views/${reportViewScope()}`);
+      const data = await res.json();
+      state.views = data.views || [];
+    } catch (_) {
+      state.views = [];
+    }
+  }
+
+  function applyReportView(view) {
+    const minDaysPreset = document.getElementById('report-min-days-preset');
+    const minDaysCustom = document.getElementById('report-min-days-custom');
+    const state = activeState();
+
+    if (view) {
+      state.minDays  = Number(view.config.minDays) || 0;
+      state.sortKey  = view.config.sortKey || state.sortKey;
+      state.sortDir  = view.config.sortDir || 'desc';
+      state.hidden   = new Set(view.config.hiddenCols || []);
+      state.activeId = String(view.id);
+    } else {
+      state.minDays  = 0;
+      state.sortKey  = activeReportId === 'offline-duration' ? 'offlineDurationMs' : 'name';
+      state.sortDir  = 'desc';
+      state.hidden   = new Set();
+      state.activeId = null;
+    }
+
+    if (minDaysPreset) {
+      const presetVal = String(state.minDays);
+      const hasOption = [...minDaysPreset.options].some((o) => o.value === presetVal);
+      if (hasOption) {
+        minDaysPreset.value = presetVal;
+        minDaysCustom.classList.add('hidden');
+      } else {
+        minDaysPreset.value = 'custom';
+        minDaysCustom.value = state.minDays;
+        minDaysCustom.classList.remove('hidden');
+      }
+    }
+
+    renderReportColumnsList();
+    applyReportColumnVisibility();
+    renderReportViewsMenu();
+    renderReportTable();
+    document.getElementById('report-views-dropdown').classList.add('hidden');
+  }
+
+  async function saveReportView() {
+    const name = window.prompt('Name this view:');
+    if (!name || !name.trim()) return;
+    const state = activeState();
+    try {
+      const res = await fetch(`/api/views/${reportViewScope()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          config: {
+            minDays: state.minDays,
+            sortKey: state.sortKey,
+            sortDir: state.sortDir,
+            hiddenCols: [...state.hidden],
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save');
+      await loadReportViews();
+      renderReportViewsMenu();
+    } catch (e) {
+      alert('Could not save view: ' + e.message);
+    }
+  }
+
+  function renderReportViewsMenu() {
+    const list = document.getElementById('report-views-list');
+    if (!list) return;
+    const state = activeState();
+
+    const activeView = state.views.find((v) => String(v.id) === state.activeId);
+    const btn = document.getElementById('report-views-btn');
+    if (btn) {
+      btn.innerHTML = activeView
+        ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10b981;margin-right:4px;vertical-align:middle;"></span>View: ${esc(activeView.name)} <span class="tab-chevron">▾</span>`
+        : `Views <span class="tab-chevron">▾</span>`;
+    }
+
+    const defaultRow = `
+      <button type="button" class="tab-dropdown-item ${state.activeId === null ? 'tab-dropdown-item--active' : ''}" data-report-view-default>
+        <span class="tab-dropdown-item-dot"></span>Default (all columns)
+      </button>`;
+
+    if (!state.views.length) {
+      list.innerHTML = defaultRow + '<div class="tab-dropdown-empty">No saved views yet</div>';
+    } else {
+      list.innerHTML = defaultRow + state.views.map((v) => `
+        <div class="tab-dropdown-view-row">
+          <button type="button" class="tab-dropdown-item ${state.activeId === String(v.id) ? 'tab-dropdown-item--active' : ''}" data-report-view-id="${v.id}">
+            <span class="tab-dropdown-item-dot"></span>${esc(v.name)}
+          </button>
+          <button type="button" class="tab-dropdown-view-delete" data-report-view-delete="${v.id}" title="Delete view">✕</button>
+        </div>
+      `).join('');
+    }
+
+    const defaultBtn = list.querySelector('[data-report-view-default]');
+    if (defaultBtn) defaultBtn.addEventListener('click', () => applyReportView(null));
+
+    list.querySelectorAll('[data-report-view-id]').forEach((btn2) => {
+      btn2.addEventListener('click', () => {
+        const view = state.views.find((v) => String(v.id) === btn2.dataset.reportViewId);
+        if (view) applyReportView(view);
+      });
+    });
+
+    list.querySelectorAll('[data-report-view-delete]').forEach((btn2) => {
+      btn2.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = btn2.dataset.reportViewDelete;
+        if (state.activeId === String(id)) state.activeId = null;
+        try {
+          await fetch(`/api/views/${reportViewScope()}/${id}`, { method: 'DELETE' });
+          await loadReportViews();
+          renderReportViewsMenu();
+        } catch (_) {}
+      });
+    });
+
+    const divider = document.createElement('div');
+    divider.className = 'tab-dropdown-divider';
+    list.appendChild(divider);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'tab-dropdown-item';
+    saveBtn.textContent = '💾 Save Current View';
+    saveBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveReportView();
+    });
+    list.appendChild(saveBtn);
+  }
+
+  // ─── Report profile sidebar ────────────────────────────────────────────────
+
+  async function loadCustomReports() {
+    try {
+      const res  = await fetch('/api/custom-reports');
+      const data = await res.json();
+      customReports = data.reports || [];
+    } catch (_) {
+      customReports = [];
+    }
+  }
+
+  function renderReportProfileList() {
+    const list = document.getElementById('report-profile-items');
+    if (!list) return;
+    list.innerHTML = reportProfiles().map((p) => `
+      <div class="report-profile-item ${p.id === activeReportId ? 'report-profile-item--active' : ''}" data-report-profile="${p.id}">
+        <span class="report-profile-item-name">${esc(p.name)}</span>
+        ${p.builtin ? '' : `<button type="button" class="report-profile-item-delete" data-report-profile-delete="${p.dbId}" title="Delete report">✕</button>`}
+      </div>
+    `).join('');
+
+    list.querySelectorAll('[data-report-profile]').forEach((row) => {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('[data-report-profile-delete]')) return;
+        selectReportProfile(row.dataset.reportProfile);
+      });
+    });
+
+    list.querySelectorAll('[data-report-profile-delete]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!window.confirm('Delete this report?')) return;
+        const dbId = btn.dataset.reportProfileDelete;
+        const deletedProfileId = `custom-${dbId}`;
+        try {
+          await fetch(`/api/custom-reports/${dbId}`, { method: 'DELETE' });
+        } catch (_) {}
+        reportState.delete(deletedProfileId);
+        await loadCustomReports();
+        if (activeReportId === deletedProfileId) {
+          await selectReportProfile('offline-duration');
+        } else {
+          renderReportProfileList();
+        }
+      });
+    });
+  }
+
+  async function selectReportProfile(id) {
+    activeReportId = id;
+    const profile = findProfile(id);
+    document.getElementById('report-hint').textContent = profile ? profile.hint : '';
+    document.getElementById('report-min-days-group').classList.toggle('hidden', id !== 'offline-duration');
+    renderReportProfileList();
+    renderReportTableHead();
+    renderReportColumnsList();
+    applyReportColumnVisibility();
+    await loadReportViews();
+    renderReportViewsMenu();
+    updateReportViewToggle();
+    loadReportIfNeeded();
+    renderReportTable();
+    renderGroupGaps();
+    renderCoverageTable();
+
+    const minDaysPreset = document.getElementById('report-min-days-preset');
+    const minDaysCustom = document.getElementById('report-min-days-custom');
+    const presetVal = String(activeState().minDays);
+    const hasOption = [...minDaysPreset.options].some((o) => o.value === presetVal);
+    if (hasOption) { minDaysPreset.value = presetVal; minDaysCustom.classList.add('hidden'); }
+    else { minDaysPreset.value = 'custom'; minDaysCustom.value = activeState().minDays; minDaysCustom.classList.remove('hidden'); }
+  }
+
+  // ─── New Report builder modal ──────────────────────────────────────────────
+
+  function renderReportBuilderColumns() {
+    const box = document.getElementById('report-builder-columns');
+    box.innerHTML = DEVICE_FIELDS.map((f) => `
+      <label style="display:flex;align-items:center;gap:6px;font-weight:normal;font-size:0.82rem;">
+        <input type="checkbox" class="report-builder-col" value="${f.key}" />
+        ${esc(f.label)}
+      </label>
+    `).join('');
+  }
+
+  function addReportBuilderFilterRow() {
+    const wrap = document.getElementById('report-builder-filters');
+    const row = document.createElement('div');
+    row.className = 'report-builder-filter-row';
+    row.innerHTML = `
+      <select class="filter-select report-builder-filter-field">
+        ${DEVICE_FIELDS.map((f) => `<option value="${f.key}">${esc(f.label)}</option>`).join('')}
+      </select>
+      <select class="filter-select report-builder-filter-op">
+        <option value="equals">Equals</option>
+        <option value="contains">Contains</option>
+        <option value="gt">Greater than</option>
+        <option value="lt">Less than</option>
+        <option value="isTrue">Is true</option>
+        <option value="isFalse">Is false</option>
+      </select>
+      <input type="text" class="filter-select report-builder-filter-value" placeholder="Value" />
+      <button type="button" class="report-profile-item-delete" title="Remove filter">✕</button>
+    `;
+    row.querySelector('.report-builder-filter-op').addEventListener('change', (e) => {
+      const valInput = row.querySelector('.report-builder-filter-value');
+      valInput.classList.toggle('hidden', ['isTrue', 'isFalse'].includes(e.target.value));
+    });
+    row.querySelector('button').addEventListener('click', () => row.remove());
+    wrap.appendChild(row);
+  }
+
+  function openReportBuilder() {
+    document.getElementById('report-builder-name').value = '';
+    document.getElementById('report-builder-filters').innerHTML = '';
+    renderReportBuilderColumns();
+    document.getElementById('report-builder-modal').classList.remove('hidden');
+  }
+
+  function closeReportBuilder() {
+    document.getElementById('report-builder-modal').classList.add('hidden');
+  }
+
+  async function submitReportBuilder() {
+    const name = document.getElementById('report-builder-name').value.trim();
+    if (!name) { alert('Enter a report name.'); return; }
+    const columns = [...document.querySelectorAll('.report-builder-col:checked')].map((cb) => cb.value);
+    if (!columns.length) { alert('Select at least one column.'); return; }
+    const filters = [...document.querySelectorAll('.report-builder-filter-row')].map((row) => ({
+      field: row.querySelector('.report-builder-filter-field').value,
+      operator: row.querySelector('.report-builder-filter-op').value,
+      value: row.querySelector('.report-builder-filter-value').value,
+    }));
+
+    try {
+      const res = await fetch('/api/custom-reports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, config: { columns, filters } }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save report');
+      closeReportBuilder();
+      await loadCustomReports();
+      await selectReportProfile(`custom-${data.id}`);
+    } catch (e) {
+      alert('Could not save report: ' + e.message);
+    }
+  }
+
+  function initReportingTab() {
+    const refreshBtn    = document.getElementById('report-refresh-btn');
+    const csvBtn        = document.getElementById('report-csv-btn');
+    const minDaysPreset = document.getElementById('report-min-days-preset');
+    const minDaysCustom = document.getElementById('report-min-days-custom');
+
+    refreshBtn.addEventListener('click', () => fetchReport(activeReportId));
+
+    // The scope note explains that Expected/Missing track MobiControl's live
+    // targeting rule, not the whole fleet — easy to misread otherwise (see
+    // "100% of Expected" on a profile only targeted at a handful of devices).
+    // Dismissal persists across reloads via localStorage, same as other
+    // per-browser preferences in this app (e.g. TECH_NAME_KEY).
+    const SCOPE_NOTE_HIDDEN_KEY = 'coverageScopeNoteHidden';
+    const scopeNote = document.getElementById('coverage-scope-note');
+    const scopeNoteClose = document.getElementById('coverage-scope-note-close');
+    const scopeNoteReopen = document.getElementById('coverage-scope-note-reopen');
+    if (scopeNote && scopeNoteClose && scopeNoteReopen) {
+      const applyScopeNoteVisibility = (hidden) => {
+        scopeNote.classList.toggle('hidden', hidden);
+        scopeNoteReopen.classList.toggle('hidden', !hidden);
+      };
+      applyScopeNoteVisibility(localStorage.getItem(SCOPE_NOTE_HIDDEN_KEY) === 'true');
+      scopeNoteClose.addEventListener('click', () => {
+        localStorage.setItem(SCOPE_NOTE_HIDDEN_KEY, 'true');
+        applyScopeNoteVisibility(true);
+      });
+      scopeNoteReopen.addEventListener('click', () => {
+        localStorage.removeItem(SCOPE_NOTE_HIDDEN_KEY);
+        applyScopeNoteVisibility(false);
+      });
+    }
+
+    const saveViewBtn = document.getElementById('report-save-view-btn');
+    if (saveViewBtn) saveViewBtn.addEventListener('click', saveReportView);
+
+    minDaysPreset.addEventListener('change', () => {
+      const state = activeState();
+      if (minDaysPreset.value === 'custom') {
+        minDaysCustom.classList.remove('hidden');
+        minDaysCustom.focus();
+        state.minDays = Math.max(0, Number(minDaysCustom.value) || 0);
+      } else {
+        minDaysCustom.classList.add('hidden');
+        state.minDays = Number(minDaysPreset.value) || 0;
+      }
+      renderReportTable();
+    });
+
+    minDaysCustom.addEventListener('input', () => {
+      activeState().minDays = Math.max(0, Number(minDaysCustom.value) || 0);
+      renderReportTable();
+    });
+
+    csvBtn.addEventListener('click', () => {
+      if (activeReportId === 'device-audit') { exportCoverageCsv(); return; }
+      const profile = findProfile(activeReportId);
+      const cols    = reportColumns();
+      const sorted  = sortReportDevices(filterReportDevices(activeState().devices));
+      downloadCsvData(`${profile.id}.csv`, cols.map((c) => c.label), sorted.map((d) => cols.map((c) => reportCellPlain(c, d))));
+    });
+
+    document.getElementById('report-new-btn').addEventListener('click', openReportBuilder);
+    document.getElementById('report-builder-cancel').addEventListener('click', closeReportBuilder);
+    document.getElementById('report-builder-save').addEventListener('click', submitReportBuilder);
+    document.getElementById('report-builder-add-filter').addEventListener('click', addReportBuilderFilterRow);
+
+    loadCustomReports().then(() => selectReportProfile('offline-duration'));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   //   Init
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -3269,6 +5234,8 @@
     document.querySelectorAll('.tab-btn[data-tab]').forEach((btn) => {
       btn.addEventListener('click', () => switchTab(btn.dataset.tab));
     });
+
+    initReportingTab();
 
     // MobiControl grouped dropdown (Devices / Advanced Settings)
     const groupBtn      = document.getElementById('mobicontrol-group-btn');
@@ -3312,6 +5279,38 @@
       else if (activeTab === 'mobicontrol') refreshMc();
       else if (activeTab === 'ping')        triggerPingRun();
       else if (activeTab === 'portals')     triggerPortalsRun();
+    });
+
+    // Setup column dropdowns (connect, mobicontrol, portals, profiles, apppolicies, report only — mcapps uses setupDropdown in initMcApps)
+    ['connect', 'mobicontrol', 'portals', 'profiles', 'apppolicies', 'report'].forEach((scope) => {
+      const btn = document.getElementById(`${scope}-columns-btn`);
+      if (btn) btn.addEventListener('click', (e) => { e.stopPropagation(); toggleColumnDropdown(scope); });
+    });
+
+    // Setup views dropdowns
+    ['connect', 'mobicontrol', 'portals', 'profiles', 'apppolicies', 'report'].forEach((scope) => {
+      const btn = document.getElementById(`${scope}-views-btn`);
+      if (btn) btn.addEventListener('click', (e) => { e.stopPropagation(); toggleViewsDropdown(scope); });
+    });
+
+    // Close dropdowns when clicking elsewhere
+    document.addEventListener('click', (e) => {
+      ['connect', 'mobicontrol', 'portals', 'profiles', 'apppolicies', 'report'].forEach((scope) => {
+        const dropdown = document.getElementById(`${scope}-columns-dropdown`);
+        const btn = document.getElementById(`${scope}-columns-btn`);
+        if (dropdown && !dropdown.classList.contains('hidden') && !dropdown.contains(e.target) && e.target !== btn) {
+          dropdown.classList.add('hidden');
+          btn.setAttribute('aria-expanded', 'false');
+        }
+      });
+      ['connect', 'mobicontrol', 'portals', 'profiles', 'apppolicies', 'report'].forEach((scope) => {
+        const dropdown = document.getElementById(`${scope}-views-dropdown`);
+        const btn = document.getElementById(`${scope}-views-btn`);
+        if (dropdown && !dropdown.classList.contains('hidden') && !dropdown.contains(e.target) && e.target !== btn) {
+          dropdown.classList.add('hidden');
+          btn.setAttribute('aria-expanded', 'false');
+        }
+      });
     });
 
     initConnect();

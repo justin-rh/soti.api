@@ -65,10 +65,25 @@ db.exec(`
     void_delta  INTEGER NOT NULL DEFAULT 0,
     valid_delta INTEGER NOT NULL DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS mc_device_notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   TEXT    NOT NULL,
+    device_name TEXT    NOT NULL DEFAULT '',
+    technician  TEXT    NOT NULL,
+    note        TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS custom_reports (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    config     TEXT    NOT NULL,
+    created_at TEXT    NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS idx_cal_device ON calibration_events(device_id);
   CREATE INDEX IF NOT EXISTS idx_cal_time   ON calibration_events(triggered_at);
   CREATE INDEX IF NOT EXISTS idx_saved_views_scope ON saved_views(scope);
   CREATE INDEX IF NOT EXISTS idx_activity_device_time ON label_activity_events(device_id, recorded_at);
+  CREATE INDEX IF NOT EXISTS idx_mc_notes_device ON mc_device_notes(device_id);
 `);
 
 // Migrate reader_host_state to add cached reader-API columns (firmware survives offline checks)
@@ -158,6 +173,11 @@ const stmt = {
   upsertSetting: db.prepare(`
     INSERT INTO reader_settings (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `),
+  getMcDeviceNotes: db.prepare('SELECT * FROM mc_device_notes WHERE device_id = ? ORDER BY created_at DESC'),
+  insertMcDeviceNote: db.prepare(`
+    INSERT INTO mc_device_notes (device_id, device_name, technician, note, created_at)
+    VALUES (?, ?, ?, ?, ?)
   `),
 };
 
@@ -457,8 +477,12 @@ function processMcDevice(raw) {
   const battery     = raw.BatteryStatus ?? null;
   const isOnline    = raw.IsAgentOnline === true;
 
-  // Model: prefer "Manufacturer Model", fall back to either alone
-  const model = [raw.Manufacturer, raw.Model].filter(Boolean).join(' ') || '';
+  // Model: prefer "Manufacturer Model", fall back to either alone. Zebra's
+  // manufacturer string is dropped since nearly every scan gun in the fleet
+  // is Zebra — repeating "Zebra Technologies" on every row just wastes column
+  // width without adding information; the model number alone identifies it.
+  const manufacturer = /^zebra technologies$/i.test((raw.Manufacturer || '').trim()) ? '' : raw.Manufacturer;
+  const model = [manufacturer, raw.Model].filter(Boolean).join(' ') || '';
 
   // User: LastLoggedOnUser may be a string, object, or null
   let userName = '';
@@ -1051,6 +1075,34 @@ app.post('/api/devices/:id/action', async (req, res) => {
   }
 });
 
+// Technician-authored troubleshooting notes for a device (e.g. "pulled from
+// production for battery review"). Kept local to soti.api since MobiControl
+// has no equivalent field, so this is the only record of why a device is out.
+app.get('/api/mc/devices/:id/notes', (req, res) => {
+  try {
+    const notes = stmt.getMcDeviceNotes.all(req.params.id);
+    res.json({ notes });
+  } catch (err) {
+    console.error('[/api/mc/devices/:id/notes GET]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/mc/devices/:id/notes', (req, res) => {
+  const { technician, note, deviceName } = req.body || {};
+  if (!technician || !technician.trim()) return res.status(400).json({ error: 'technician is required' });
+  if (!note || !note.trim()) return res.status(400).json({ error: 'note is required' });
+  try {
+    const createdAt = new Date().toISOString();
+    stmt.insertMcDeviceNote.run(req.params.id, deviceName || '', technician.trim(), note.trim(), createdAt);
+    const notes = stmt.getMcDeviceNotes.all(req.params.id);
+    res.json({ notes });
+  } catch (err) {
+    console.error('[/api/mc/devices/:id/notes POST]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Full per-device detail (memory/storage, battery, antivirus, enrollment/security
 // state, Exchange status, etc.) plus custom attributes — much richer than the
 // bulk /devices list, fetched lazily only when a device row is expanded.
@@ -1135,6 +1187,30 @@ app.get('/api/mc/devices/:id/profiles', async (req, res) => {
     res.json({ profiles, lastUpdated: new Date().toISOString() });
   } catch (err) {
     console.error('[/api/mc/devices/:id/profiles]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Per-device app policy assignment — mirrors the profiles endpoint above but for
+// app policies, used by the device audit report to flag devices with none applied.
+app.get('/api/mc/devices/:id/appPolicies', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const token = await getMcToken();
+    const r = await fetch(
+      `${MC_BASE_URL}/MobiControl/api/devices/${encodeURIComponent(req.params.id)}/appPolicies`,
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }
+    );
+    if (!r.ok) {
+      const text = await r.text();
+      return res.status(r.status).json({ error: `MC device app policies fetch failed (${r.status}): ${text}` });
+    }
+    const appPolicies = await r.json();
+    res.json({ appPolicies, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/mc/devices/:id/appPolicies]', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1256,6 +1332,468 @@ app.get('/api/mc/devices', async (req, res) => {
     });
   } catch (err) {
     console.error('[/api/mc/devices]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function formatDuration(ms) {
+  if (ms == null || Number.isNaN(ms) || ms < 0) return 'Unknown';
+  const minutes = Math.floor(ms / 60000);
+  const days    = Math.floor(minutes / 1440);
+  const hours   = Math.floor((minutes % 1440) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  return `${minutes}m`;
+}
+
+// Shared device dataset for the Reporting tab — used by the built-in Offline
+// Duration report and by all user-created custom reports.
+async function getReportableDevices() {
+  const raw = await fetchAllMcDevices();
+  const now = Date.now();
+  const all = raw.map(processMcDevice);
+
+  // Same physical device can end up with two MobiControl records (e.g. re-enrolled
+  // after a factory reset) — count serial occurrences across ALL devices (not just
+  // offline ones) so a duplicate is flagged even if only one side is offline.
+  const serialCounts = new Map();
+  all.forEach((d) => {
+    if (!d.serial) return;
+    serialCounts.set(d.serial, (serialCounts.get(d.serial) || 0) + 1);
+  });
+
+  return all.map((d) => {
+    const offlineDurationMs = !d.isOnline && d.lastCheckIn ? now - new Date(d.lastCheckIn).getTime() : null;
+    return {
+      id: d.id,
+      name: d.name,
+      serial: d.serial,
+      group: d.group,
+      enrollmentTime: d.enrolled,
+      lastCheckIn: d.lastCheckIn,
+      isOnline: d.isOnline,
+      compliance: d.compliance,
+      offlineDurationMs,
+      offlineDurationLabel: formatDuration(offlineDurationMs),
+      isDuplicateSerial: !!d.serial && serialCounts.get(d.serial) > 1,
+    };
+  });
+}
+
+app.get('/api/reports/offline-duration', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const devices = (await getReportableDevices())
+      .filter((d) => !d.isOnline)
+      .sort((a, b) => (b.offlineDurationMs ?? -1) - (a.offlineDurationMs ?? -1));
+
+    res.json({ devices, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/reports/offline-duration]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Runs a limited number of async jobs concurrently instead of all at once, so a
+// device audit over ~200 devices doesn't fire 400 simultaneous MC API calls.
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function runNext() {
+    const i = next++;
+    if (i >= items.length) return;
+    results[i] = await worker(items[i], i);
+    await runNext();
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runNext));
+  return results;
+}
+
+// Fetches a profile's or app policy's real targeting rule (which group(s) it should
+// apply to, plus any per-device overrides) via the /assignment sub-resource. Same
+// shape for both resource kinds, confirmed live against MC_BASE_URL for profiles.
+async function fetchAssignmentRule(token, kind, refId, name, family, qualification) {
+  const path = kind === 'profile'
+    ? `/MobiControl/api/profiles/${encodeURIComponent(refId)}/assignment`
+    : `/MobiControl/api/appManagement/policies/${encodeURIComponent(refId)}/assignment`;
+  const res = await fetch(`${MC_BASE_URL}${path}`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } });
+  if (!res.ok) return null; // skip items we can't read rather than failing the whole audit
+  const asg = await res.json();
+  if (!asg) return null; // unassigned/draft items return HTTP 200 with a null body
+  return {
+    refId,
+    name,
+    family, // 'AndroidPlus' | 'Apple' — must match device.platform or it's never expected
+    qualification, // e.g. 'AppleIOS' vs 'AppleMACUser'/'AppleMACDevice' — Apple covers both iOS and macOS
+    targetGroups: (asg.TargetDeviceGroups || []).map((g) => ({ path: g.DeviceGroupPath || '', excluded: !!g.Excluded })),
+    targetDevices: (asg.TargetDevices || []).map((d) => ({ deviceId: d.DeviceId, excluded: !!d.Excluded })),
+  };
+}
+
+// Apple's DeviceFamily lumps iPhones/iPads and Macs together, so a device also
+// needs an iOS-vs-macOS bucket (derived from its model string) to compare against
+// a profile/policy's DeviceFamilyQualification (AppleIOS vs AppleMACUser/Device).
+function appleSubFamily(device) {
+  if (device.platform !== 'Apple') return null;
+  return /\bmac/i.test(device.model || '') ? 'mac' : 'ios';
+}
+
+// Resolves whether a device is actually expected to have a given profile/policy,
+// using MobiControl's real targeting semantics: platform must match first (a Mac
+// profile can never apply to an Android scanner even if the group path matches);
+// then an explicit per-device override (TargetDevices) always wins; otherwise the
+// MOST SPECIFIC matching group path (longest prefix of the device's group path)
+// decides, since a child group can be excluded from a broader parent assignment.
+function isExpected(rule, device) {
+  if (rule.family && device.platform && rule.family !== device.platform) return false;
+  if (rule.family === 'Apple' && rule.qualification) {
+    // Profiles use DeviceFamilyQualification ("AppleMACUser"/"AppleMACDevice"/"AppleIOS");
+    // app policies use Kind ("AppleMac"/"AppleIos") — both handled by the same regex test.
+    const wantsMac = /mac/i.test(rule.qualification);
+    const wantsIos = /ios/i.test(rule.qualification);
+    const deviceSub = appleSubFamily(device);
+    if (wantsMac && deviceSub !== 'mac') return false;
+    if (wantsIos && deviceSub !== 'ios') return false;
+  }
+
+  const deviceOverride = rule.targetDevices.find((td) => td.deviceId === device.id);
+  if (deviceOverride) return !deviceOverride.excluded;
+
+  const groupPath = device.groupPath || '';
+  let best = null;
+  for (const g of rule.targetGroups) {
+    if (!g.path) continue;
+    const matches = groupPath === g.path || groupPath.startsWith(g.path + '\\') || groupPath.startsWith(g.path + '/');
+    if (!matches) continue;
+    if (!best || g.path.length > best.path.length) best = g;
+  }
+  return best ? !best.excluded : false;
+}
+
+// Human-readable platform scope for a coverage row, so a profile/policy that only
+// ever applies to (say) Android devices doesn't read as "missing" on Apple ones —
+// it was simply never meant to reach them.
+function scopeLabel(rule) {
+  if (rule.family === 'AndroidPlus') return 'Android';
+  if (rule.family === 'Apple') {
+    const wantsMac = /mac/i.test(rule.qualification || '');
+    const wantsIos = /ios/i.test(rule.qualification || '');
+    if (wantsMac && !wantsIos) return 'Apple (macOS)';
+    if (wantsIos && !wantsMac) return 'Apple (iOS)';
+    return 'Apple (iOS + macOS)';
+  }
+  return 'All platforms';
+}
+
+// Device audit — compares each device's ACTUAL profiles/app policies against what
+// MobiControl's real targeting rules say it SHOULD have (via /assignment), so gaps
+// name the specific missing profile/policy instead of a bare yes/no flag. Also
+// flags devices offline beyond the staleness threshold.
+app.get('/api/reports/device-audit', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  try {
+    const staleDays = Number(req.query.staleDays) > 0 ? Number(req.query.staleDays) : 7;
+    const staleMs = staleDays * 24 * 60 * 60 * 1000;
+
+    const token = await getMcToken();
+    const rawDevices = await fetchAllMcDevices();
+    const devices = rawDevices.map(processMcDevice);
+    const now = Date.now();
+    devices.forEach((d) => {
+      d.offlineDurationMs = !d.isOnline && d.lastCheckIn ? now - new Date(d.lastCheckIn).getTime() : null;
+      d.offlineDurationLabel = formatDuration(d.offlineDurationMs);
+    });
+
+    // Bulk-fetch every profile and app policy, then resolve each one's real
+    // targeting rule. This is the "baseline" — small (tens of items), unlike the
+    // per-device loop below, so full concurrency is fine.
+    const [profilesRaw, androidPolicies, applePolicies] = await Promise.all([
+      (async () => {
+        const all = [];
+        let skip = 0;
+        const take = 200;
+        while (true) {
+          const r = await fetch(`${MC_BASE_URL}/MobiControl/api/profiles?skip=${skip}&take=${take}`,
+            { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } });
+          if (!r.ok) throw new Error(`MC profiles list fetch failed (${r.status}): ${await r.text()}`);
+          const raw = await r.json();
+          const page = Array.isArray(raw) ? raw : (raw.items || raw.data || []);
+          all.push(...page);
+          if (page.length < take) break;
+          skip += take;
+        }
+        return all;
+      })(),
+      fetchAllAndroidAppPolicies(),
+      fetchAllApplePolicies(),
+    ]);
+    // Tag each policy with the family it was fetched under (the list split is the
+    // source of truth for platform — policies have no DeviceFamily field of their own).
+    androidPolicies.forEach((p) => { p._family = 'AndroidPlus'; });
+    applePolicies.forEach((p) => { p._family = 'Apple'; });
+    const policiesRaw = [...androidPolicies, ...applePolicies];
+
+    const [profileRules, policyRules] = await Promise.all([
+      runWithConcurrency(profilesRaw, 8, (p) => fetchAssignmentRule(token, 'profile', p.ReferenceId, p.Name, p.DeviceFamily, p.DeviceFamilyQualification)),
+      runWithConcurrency(policiesRaw, 8, (p) => fetchAssignmentRule(token, 'policy', p.ReferenceId, p.Name, p._family, p.Kind)),
+    ]);
+    const validProfileRules = profileRules.filter(Boolean);
+    const validPolicyRules = policyRules.filter(Boolean);
+
+    const audited = await runWithConcurrency(devices, 8, async (d) => {
+      const [profilesRes, policiesRes] = await Promise.all([
+        fetch(`${MC_BASE_URL}/MobiControl/api/devices/${encodeURIComponent(d.id)}/profiles`,
+          { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }),
+        fetch(`${MC_BASE_URL}/MobiControl/api/devices/${encodeURIComponent(d.id)}/appPolicies`,
+          { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en-US' } }),
+      ]);
+
+      let actualProfiles = [];
+      let actualPolicies = [];
+      let fetchError = null;
+      if (profilesRes.ok) actualProfiles = await profilesRes.json();
+      else fetchError = `profiles ${profilesRes.status}`;
+      if (policiesRes.ok) actualPolicies = await policiesRes.json();
+      else fetchError = fetchError ? `${fetchError}, appPolicies ${policiesRes.status}` : `appPolicies ${policiesRes.status}`;
+
+      const actualProfileIds = new Set((Array.isArray(actualProfiles) ? actualProfiles : []).map((p) => p.ReferenceId));
+      const actualPolicyIds = new Set((Array.isArray(actualPolicies) ? actualPolicies : []).map((p) => p.ReferenceId));
+
+      const missingProfiles = validProfileRules
+        .filter((rule) => isExpected(rule, d) && !actualProfileIds.has(rule.refId))
+        .map((rule) => rule.name);
+      const missingAppPolicies = validPolicyRules
+        .filter((rule) => isExpected(rule, d) && !actualPolicyIds.has(rule.refId))
+        .map((rule) => rule.name);
+
+      const isStale = !d.isOnline && d.offlineDurationMs !== null && d.offlineDurationMs > staleMs;
+
+      return {
+        id: d.id,
+        name: d.name,
+        group: d.group,
+        groupPath: d.groupPath,
+        model: d.model,
+        isOnline: d.isOnline,
+        lastCheckIn: d.lastCheckIn,
+        offlineDurationLabel: d.offlineDurationLabel,
+        missingProfiles,
+        missingAppPolicies,
+        isStale,
+        fetchError,
+        actualProfileIds,
+        actualPolicyIds,
+      };
+    });
+
+    const flagged = audited.filter((d) => d.missingProfiles.length || d.missingAppPolicies.length || d.isStale || d.fetchError);
+
+    // Per-group rollup so patterns (a whole group missing the same item) are
+    // visible at a glance instead of only as a flat per-device list.
+    const groupGapCounts = new Map(); // "group||kind||name" -> count
+    flagged.forEach((d) => {
+      d.missingProfiles.forEach((name) => {
+        const key = `${d.group}||Profile||${name}`;
+        groupGapCounts.set(key, (groupGapCounts.get(key) || 0) + 1);
+      });
+      d.missingAppPolicies.forEach((name) => {
+        const key = `${d.group}||App Policy||${name}`;
+        groupGapCounts.set(key, (groupGapCounts.get(key) || 0) + 1);
+      });
+    });
+    const groupTotals = new Map();
+    devices.forEach((d) => groupTotals.set(d.group, (groupTotals.get(d.group) || 0) + 1));
+    const groupGaps = [...groupGapCounts.entries()]
+      .map(([key, count]) => {
+        const [group, kind, name] = key.split('||');
+        return { group, kind, name, missingCount: count, totalInGroup: groupTotals.get(group) || 0 };
+      })
+      .sort((a, b) => b.missingCount - a.missingCount);
+
+    // Coverage: for every profile/app policy with a real targeting rule, how many
+    // devices ACTUALLY have it vs. how many are expected to, broken down per group
+    // down to the device level — so "missing" means a device MobiControl's own
+    // targeting rule expects to have it, but doesn't (not just "this group has
+    // fewer than that group"). Groups a rule was never meant to reach (e.g. a
+    // non-RFID scan gun model excluded from an RFID profile) simply never appear
+    // in expectedDevices for that group, so they're correctly absent from gaps.
+    // A rule that expects it nowhere and is actually installed nowhere is config
+    // drift — defined in MobiControl but never deployed to anything.
+    const deviceById = new Map(devices.map((d) => [d.id, d]));
+    // Staging devices aren't in production use yet, so they'd skew both the
+    // numerator and denominator of coverage math with gaps that aren't real.
+    // Matched on the leaf group name (same value shown in the group column),
+    // not groupPath, since "Master Electronics - Staging" is itself a leaf
+    // group name rather than a full MobiControl tree path.
+    const STAGING_GROUP_NAME = 'Master Electronics - Staging';
+    const coverageAudited = audited.filter((d) => d.group !== STAGING_GROUP_NAME);
+    function buildCoverage(rules, kind, idKey) {
+      return rules.map((rule) => {
+        // Keyed by group+model, not just group — some rules target specific
+        // device models within a physical group (e.g. one scan gun model but
+        // not another), so lumping every model together under one group row
+        // would hide that split.
+        // Keyed by group+model so every device lands in exactly one row: a
+        // group+model with at least one expected device is an in-scope row
+        // (`groups`), everything else is an out-of-scope row (`excludedGroups`).
+        // Previously a group+model with zero expected devices but one stray
+        // "has it anyway" device produced a phantom 0/0 row in `groups` AND a
+        // separate entry in `excludedGroups` for its other devices — same
+        // group, split across two tables.
+        const groupMap = new Map(); // "group||model" -> { model, actualDevices, missingDevices, extraDevices, excludedDevices, expectedCount }
+        let totalActual = 0; // devices that have it AND are expected to (real coverage numerator)
+        let totalExpected = 0;
+        let totalExtra = 0; // has it but out of scope for this rule — not a gap, just a surprise install
+        let totalExcluded = 0; // out of scope and doesn't have it — not relevant to this rule at all
+        coverageAudited.forEach((d) => {
+          const model = d.model || 'Unknown';
+          const groupKey = `${d.group}||${model}`;
+          const has = d[idKey].has(rule.refId);
+          const expected = isExpected(rule, deviceById.get(d.id) || d);
+          if (expected) totalExpected += 1;
+          if (has && expected) totalActual += 1;
+          if (has && !expected) totalExtra += 1;
+          if (!has && !expected) totalExcluded += 1;
+          if (!groupMap.has(groupKey)) groupMap.set(groupKey, { group: d.group, model, actualDevices: [], missingDevices: [], extraDevices: [], excludedDevices: [], expectedCount: 0 });
+          const g = groupMap.get(groupKey);
+          if (expected) {
+            g.expectedCount += 1;
+            if (has) g.actualDevices.push(d.name); else g.missingDevices.push(d.name);
+          } else if (has) {
+            g.extraDevices.push(d.name);
+          } else {
+            g.excludedDevices.push(d.name);
+          }
+        });
+        const allGroupRows = [...groupMap.values()];
+        const groups = allGroupRows
+          .filter((g) => g.expectedCount > 0)
+          .map((g) => ({
+            group: g.group,
+            model: g.model,
+            actualCount: g.actualDevices.length,
+            expectedCount: g.expectedCount,
+            missingCount: g.missingDevices.length,
+            extraCount: g.extraDevices.length,
+            actualDevices: g.actualDevices,
+            missingDevices: g.missingDevices,
+            extraDevices: g.extraDevices,
+          }))
+          // Sorted by group first (not worst-missing-first) so the UI can display
+          // every model for a group as one contiguous block instead of repeating
+          // the group name once per model.
+          .sort((a, b) => a.group.localeCompare(b.group) || b.missingCount - a.missingCount || a.model.localeCompare(b.model));
+        const excludedGroups = allGroupRows
+          .filter((g) => g.expectedCount === 0)
+          .map((g) => ({
+            group: g.group,
+            model: g.model,
+            count: g.excludedDevices.length,
+            devices: g.excludedDevices,
+            extraCount: g.extraDevices.length,
+            extraDevices: g.extraDevices,
+          }))
+          // Same group-first ordering as `groups` above, for the same reason.
+          .sort((a, b) => a.group.localeCompare(b.group) || b.count - a.count || a.model.localeCompare(b.model));
+        return {
+          name: rule.name,
+          kind,
+          scope: scopeLabel(rule),
+          totalActual,
+          totalExpected,
+          totalExtra,
+          totalMissing: groups.reduce((sum, g) => sum + g.missingCount, 0),
+          globalPct: totalExpected ? Math.round((totalActual / totalExpected) * 100) : (totalActual || totalExtra ? null : 0),
+          groups,
+          totalExcluded,
+          excludedGroups,
+          isDriftUntargeted: totalExpected === 0 && totalActual === 0 && totalExtra === 0,
+        };
+      });
+    }
+    const coverage = [
+      ...buildCoverage(validProfileRules, 'Profile', 'actualProfileIds'),
+      ...buildCoverage(validPolicyRules, 'App Policy', 'actualPolicyIds'),
+    ];
+
+    res.json({
+      devices: flagged.map(({ actualProfileIds, actualPolicyIds, ...d }) => d),
+      groupGaps,
+      coverage,
+      totalDevices: devices.length,
+      flaggedCount: flagged.length,
+      staleDays,
+      lastUpdated: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[/api/reports/device-audit]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Custom reports (user-created report profiles) ─────────────────────────
+
+function applyReportFilters(devices, filters) {
+  if (!Array.isArray(filters) || !filters.length) return devices;
+  return devices.filter((d) => filters.every((f) => {
+    const val = d[f.field];
+    switch (f.operator) {
+      case 'equals':       return String(val ?? '').toLowerCase() === String(f.value ?? '').toLowerCase();
+      case 'contains':     return String(val ?? '').toLowerCase().includes(String(f.value ?? '').toLowerCase());
+      case 'gt':           return Number(val) > Number(f.value);
+      case 'lt':           return Number(val) < Number(f.value);
+      case 'isTrue':       return !!val;
+      case 'isFalse':      return !val;
+      default:             return true;
+    }
+  }));
+}
+
+app.get('/api/custom-reports', (req, res) => {
+  const rows = db.prepare('SELECT id, name, config, created_at FROM custom_reports ORDER BY created_at').all();
+  res.json({ reports: rows.map((r) => ({ id: r.id, name: r.name, config: JSON.parse(r.config), createdAt: r.created_at })) });
+});
+
+app.post('/api/custom-reports', (req, res) => {
+  const { name, config } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+  if (!config || typeof config !== 'object') return res.status(400).json({ error: 'config is required' });
+  const info = db.prepare('INSERT INTO custom_reports (name, config, created_at) VALUES (?, ?, ?)')
+    .run(name.trim(), JSON.stringify(config), new Date().toISOString());
+  res.json({ id: info.lastInsertRowid });
+});
+
+app.put('/api/custom-reports/:id', (req, res) => {
+  const { name, config } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+  if (!config || typeof config !== 'object') return res.status(400).json({ error: 'config is required' });
+  db.prepare('UPDATE custom_reports SET name = ?, config = ? WHERE id = ?')
+    .run(name.trim(), JSON.stringify(config), req.params.id);
+  res.json({ ok: true });
+});
+
+app.delete('/api/custom-reports/:id', (req, res) => {
+  db.prepare('DELETE FROM custom_reports WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/custom-reports/:id/data', async (req, res) => {
+  if (!MC_BASE_URL || !MC_CLIENT_ID || !MC_CLIENT_SECRET || !MC_USERNAME || !MC_PASSWORD) {
+    return res.status(503).json({ error: 'MobiControl credentials not fully configured in .env (need MC_CLIENT_ID, MC_CLIENT_SECRET, MC_USERNAME, MC_PASSWORD)' });
+  }
+  const row = db.prepare('SELECT config FROM custom_reports WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Report not found' });
+  try {
+    const config  = JSON.parse(row.config);
+    const devices = applyReportFilters(await getReportableDevices(), config.filters);
+    res.json({ devices, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    console.error('[/api/custom-reports/:id/data]', err.message);
     res.status(500).json({ error: err.message });
   }
 });

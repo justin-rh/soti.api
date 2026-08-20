@@ -94,6 +94,11 @@
           <span class="tab-dropdown-item-dot"></span>
           Profiles
         </button>
+        <button class="tab-dropdown-item" data-tab="reporting" role="menuitem menuitemradio"
+                aria-controls="tab-reporting">
+          <span class="tab-dropdown-item-dot"></span>
+          Reporting
+        </button>
       </div>
     </div>
     <button class="tab-btn" data-tab="ping" role="tab"
@@ -166,6 +171,33 @@
           <option value="">All Groups</option>
         </select>
         <button id="clear-filters" class="btn-clear" title="Clear all filters">Clear</button>
+      </section>
+
+      <section class="ping-controls" style="gap: 8px;">
+        <div class="ping-controls-row">
+          <div class="tab-group">
+            <button type="button" id="connect-columns-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              ⚙ Columns
+            </button>
+            <div id="connect-columns-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="connect-columns-list"></div>
+            </div>
+          </div>
+          <div class="tab-group">
+            <button type="button" id="connect-views-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              Views
+            </button>
+            <div id="connect-views-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="connect-views-list"></div>
+            </div>
+          </div>
+          <button type="button" id="connect-save-view-btn" class="btn btn--sm" title="Save current view configuration">
+            💾 Save View
+          </button>
+          <button type="button" id="connect-csv-btn" class="btn btn--sm" title="Export to CSV">
+            📥 Export CSV
+          </button>
+        </div>
       </section>
 
       <section class="table-wrap" aria-label="Printer list">
@@ -258,6 +290,33 @@
         </select>
         <button id="mc-clear-filters" class="btn-clear" title="Clear all filters">Clear</button>
         <button id="mc-compare-btn" class="btn btn--sm" disabled title="Select 2 devices to compare">Compare (0/2)</button>
+      </section>
+
+      <section class="ping-controls" style="gap: 8px;">
+        <div class="ping-controls-row">
+          <div class="tab-group">
+            <button type="button" id="mc-columns-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              ⚙ Columns
+            </button>
+            <div id="mc-columns-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="mc-columns-list"></div>
+            </div>
+          </div>
+          <div class="tab-group">
+            <button type="button" id="mc-views-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              Views
+            </button>
+            <div id="mc-views-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="mc-views-list"></div>
+            </div>
+          </div>
+          <button type="button" id="mc-save-view-btn" class="btn btn--sm" title="Save current view configuration">
+            💾 Save View
+          </button>
+          <button type="button" id="mc-csv-btn" class="btn btn--sm" title="Export to CSV">
+            📥 Export CSV
+          </button>
+        </div>
       </section>
 
       <section class="table-wrap" aria-label="Device list">
@@ -413,6 +472,9 @@
             <button type="button" id="mcapps-save-view-btn" class="tab-dropdown-item">+ Save current view&hellip;</button>
           </div>
         </div>
+        <button type="button" id="mcapps-csv-btn" class="btn btn--sm" title="Export to CSV">
+          📥 Export CSV
+        </button>
       </section>
 
       <section class="table-wrap" aria-label="Enterprise apps list">
@@ -484,6 +546,28 @@
             <option value="">All Families</option>
           </select>
           <button id="profiles-list-refresh" class="btn btn--sm">Refresh</button>
+          <div class="tab-group">
+            <button type="button" id="profiles-columns-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              ⚙ Columns
+            </button>
+            <div id="profiles-columns-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="profiles-columns-list"></div>
+            </div>
+          </div>
+          <div class="tab-group">
+            <button type="button" id="profiles-views-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              Views
+            </button>
+            <div id="profiles-views-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="profiles-views-list"></div>
+            </div>
+          </div>
+          <button type="button" id="profiles-save-view-btn" class="btn btn--sm" title="Save current view configuration">
+            💾 Save View
+          </button>
+          <button type="button" id="profiles-csv-btn" class="btn btn--sm" title="Export to CSV">
+            📥 Export CSV
+          </button>
         </div>
         <div class="table-wrap">
           <table class="printer-table" id="profiles-list-table">
@@ -550,6 +634,28 @@
             <option value="">All Families</option>
           </select>
           <button id="apppolicies-list-refresh" class="btn btn--sm">Refresh</button>
+          <div class="tab-group">
+            <button type="button" id="apppolicies-columns-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              ⚙ Columns
+            </button>
+            <div id="apppolicies-columns-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="apppolicies-columns-list"></div>
+            </div>
+          </div>
+          <div class="tab-group">
+            <button type="button" id="apppolicies-views-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              Views
+            </button>
+            <div id="apppolicies-views-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="apppolicies-views-list"></div>
+            </div>
+          </div>
+          <button type="button" id="apppolicies-save-view-btn" class="btn btn--sm" title="Save current view configuration">
+            💾 Save View
+          </button>
+          <button type="button" id="apppolicies-csv-btn" class="btn btn--sm" title="Export to CSV">
+            📥 Export CSV
+          </button>
         </div>
         <div class="table-wrap">
           <table class="printer-table" id="apppolicies-list-table">
@@ -720,6 +826,33 @@
         </div>
       </section>
 
+      <section class="ping-controls" style="gap: 8px;">
+        <div class="ping-controls-row">
+          <div class="tab-group">
+            <button type="button" id="portal-columns-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              ⚙ Columns
+            </button>
+            <div id="portal-columns-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="portal-columns-list"></div>
+            </div>
+          </div>
+          <div class="tab-group">
+            <button type="button" id="portal-views-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+              Views
+            </button>
+            <div id="portal-views-dropdown" class="tab-dropdown hidden" role="menu">
+              <div id="portal-views-list"></div>
+            </div>
+          </div>
+          <button type="button" id="portal-save-view-btn" class="btn btn--sm" title="Save current view configuration">
+            💾 Save View
+          </button>
+          <button type="button" id="portal-csv-btn" class="btn btn--sm" title="Export to CSV">
+            📥 Export CSV
+          </button>
+        </div>
+      </section>
+
       <section class="table-wrap" aria-label="Portal list">
         <div class="ping-table-header">
           <span class="ping-table-title">Portals</span>
@@ -750,6 +883,135 @@
           <span id="portal-row-count" class="row-count"></span>
         </div>
       </section>
+
+    </div>
+
+    <!-- ═══ REPORTING TAB ════════════════════════════════════════════════════ -->
+    <div id="tab-reporting" class="tab-content" role="tabpanel">
+
+      <div class="reporting-layout">
+        <aside id="report-profile-list" class="report-profile-list" aria-label="Report profiles">
+          <button type="button" id="report-new-btn" class="btn btn--sm" style="width:100%;margin-bottom:8px;">+ New Report</button>
+          <div id="report-profile-items"></div>
+        </aside>
+
+        <section id="report-detail-panel" class="report-detail-panel">
+          <section class="filter-bar" aria-label="Reporting controls">
+            <div id="report-min-days-group" style="display:flex;align-items:center;gap:8px;">
+              <label class="report-min-days-label" for="report-min-days-preset">Offline for at least</label>
+              <select id="report-min-days-preset" class="filter-select" aria-label="Minimum days offline">
+                <option value="0">Any duration</option>
+                <option value="1">1+ day</option>
+                <option value="3">3+ days</option>
+                <option value="7">7+ days</option>
+                <option value="14">14+ days</option>
+                <option value="30">30+ days</option>
+                <option value="60">60+ days</option>
+                <option value="custom">Custom&hellip;</option>
+              </select>
+              <input type="number" id="report-min-days-custom" class="filter-select report-min-days-input hidden" min="0" step="1" placeholder="Days" aria-label="Custom minimum days offline" />
+            </div>
+            <button type="button" id="report-refresh-btn" class="btn btn--sm" title="Refresh report">
+              🔄 Refresh
+            </button>
+            <button type="button" id="report-csv-btn" class="btn btn--sm" title="Export to CSV">
+              📥 Export CSV
+            </button>
+          </section>
+
+          <section class="ping-controls" style="gap: 8px;">
+            <div class="ping-controls-row">
+              <div class="tab-group">
+                <button type="button" id="report-columns-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+                  ⚙ Columns
+                </button>
+                <div id="report-columns-dropdown" class="tab-dropdown hidden" role="menu">
+                  <div id="report-columns-list"></div>
+                </div>
+              </div>
+              <div class="tab-group">
+                <button type="button" id="report-views-btn" class="btn btn--sm" aria-haspopup="true" aria-expanded="false">
+                  Views
+                </button>
+                <div id="report-views-dropdown" class="tab-dropdown hidden" role="menu">
+                  <div id="report-views-list"></div>
+                </div>
+              </div>
+              <button type="button" id="report-save-view-btn" class="btn btn--sm" title="Save current view configuration">
+                💾 Save View
+              </button>
+            </div>
+          </section>
+
+          <section class="report-panel">
+            <p id="report-hint" class="report-hint"></p>
+
+            <div id="report-devices-view">
+              <section class="table-wrap" aria-label="Report results">
+                <table class="printer-table" id="report-table">
+                  <thead id="report-table-head"></thead>
+                  <tbody id="report-table-body">
+                    <tr class="table-placeholder">
+                      <td>Loading report&hellip;</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div id="report-no-results" class="no-results hidden">No devices matched this report.</div>
+                <div class="table-footer">
+                  <span id="report-row-count" class="row-count"></span>
+                </div>
+              </section>
+            </div>
+
+            <div id="report-coverage-view" class="hidden">
+              <div id="coverage-scope-note" class="coverage-scope-note hidden">
+                <button type="button" id="coverage-scope-note-close" class="coverage-scope-note-close" aria-label="Hide this note">✕</button>
+                <strong>How to read Expected / Missing:</strong> both are scoped to whatever MobiControl's real targeting rule for this profile/policy currently reaches &mdash; not the whole fleet. If something is targeted at a handful of specific devices instead of a full device group, "100% of Expected" only means those specific devices have it; it says nothing about everyone else. Those other devices show up separately under "Out of scope" below, since the rule was never told to reach them.
+              </div>
+              <button type="button" id="coverage-scope-note-reopen" class="coverage-scope-note-reopen hidden">ⓘ About Expected / Missing</button>
+              <div id="report-group-gaps" class="hidden" style="margin-bottom:12px;"></div>
+              <section class="table-wrap" aria-label="Coverage results">
+                <table class="printer-table" id="report-coverage-table">
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>Name</th>
+                      <th>Kind</th>
+                      <th>Scope</th>
+                      <th>Applied To</th>
+                      <th>Expected On</th>
+                      <th>Missing</th>
+                      <th title="Applied devices divided by devices actually expected to have it (excludes staging and out-of-scope devices)">% of Expected</th>
+                    </tr>
+                  </thead>
+                  <tbody id="report-coverage-table-body"></tbody>
+                </table>
+                <div id="report-coverage-no-results" class="no-results hidden">No profiles or app policies found.</div>
+              </section>
+            </div>
+          </section>
+        </section>
+      </div>
+
+      <div id="report-builder-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-label="New report">
+        <div class="modal-box">
+          <h3>New Report</h3>
+          <label for="report-builder-name">Report name</label>
+          <input type="text" id="report-builder-name" class="filter-select" style="width:100%;margin-bottom:12px;" placeholder="e.g. Duplicate Serials" />
+
+          <label>Columns</label>
+          <div id="report-builder-columns" class="report-builder-columns"></div>
+
+          <label style="margin-top:12px;display:block;">Filters (all must match)</label>
+          <div id="report-builder-filters"></div>
+          <button type="button" id="report-builder-add-filter" class="btn btn--sm" style="margin-top:6px;">+ Add filter</button>
+
+          <div class="modal-actions" style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end;">
+            <button type="button" id="report-builder-cancel" class="btn btn--sm">Cancel</button>
+            <button type="button" id="report-builder-save" class="btn btn--sm btn--primary">Save Report</button>
+          </div>
+        </div>
+      </div>
 
     </div>
 
